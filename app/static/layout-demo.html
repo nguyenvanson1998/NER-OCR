@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NER OCR Layout Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #17212b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 0 24px;
+      border-bottom: 1px solid #d9e1ea;
+      background: #ffffff;
+    }
+    h1 { margin: 0; font-size: 18px; font-weight: 750; letter-spacing: 0; }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    input[type="file"] {
+      width: min(360px, 42vw);
+      max-width: 100%;
+      padding: 8px;
+      border: 1px solid #c9d3df;
+      border-radius: 6px;
+      background: #ffffff;
+      font-size: 13px;
+    }
+    button {
+      height: 38px;
+      padding: 0 14px;
+      border: 0;
+      border-radius: 6px;
+      background: #0f5fbf;
+      color: #ffffff;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:disabled { background: #8ba7c7; cursor: progress; }
+    .status {
+      min-width: 180px;
+      text-align: right;
+      font-size: 13px;
+      color: #4d5f72;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(420px, 1.2fr) minmax(360px, 0.8fr);
+      height: calc(100vh - 64px);
+    }
+    .viewer {
+      overflow: auto;
+      padding: 18px;
+      border-right: 1px solid #d9e1ea;
+      background: #e9edf2;
+    }
+    .page {
+      position: relative;
+      width: min(100%, 920px);
+      margin: 0 auto 18px;
+      border: 1px solid #c4ceda;
+      background: #ffffff;
+      box-shadow: 0 1px 5px rgba(25, 37, 51, 0.12);
+    }
+    .page-label {
+      position: sticky;
+      top: 0;
+      z-index: 4;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      border-bottom: 1px solid #d9e1ea;
+      background: rgba(255, 255, 255, 0.92);
+      font-size: 12px;
+      color: #4d5f72;
+    }
+    .page-body {
+      position: relative;
+      line-height: 0;
+    }
+    canvas, .page-image {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .bbox {
+      position: absolute;
+      border: 2px solid rgba(15, 95, 191, 0.9);
+      background: rgba(15, 95, 191, 0.13);
+      border-radius: 2px;
+      pointer-events: auto;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+    }
+    .bbox:hover,
+    .bbox.active {
+      border-color: #e35b19;
+      background: rgba(227, 91, 25, 0.2);
+      box-shadow: 0 0 0 3px rgba(227, 91, 25, 0.14);
+    }
+    .bbox-label {
+      position: absolute;
+      left: 0;
+      top: -22px;
+      max-width: 240px;
+      padding: 3px 7px;
+      border-radius: 4px;
+      background: #17212b;
+      color: white;
+      font-size: 11px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      opacity: 0;
+      transform: translateY(2px);
+      transition: opacity 120ms ease, transform 120ms ease;
+    }
+    .bbox:hover .bbox-label,
+    .bbox.active .bbox-label {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .results {
+      min-width: 0;
+      overflow: auto;
+      background: #ffffff;
+    }
+    .summary {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding: 14px;
+      border-bottom: 1px solid #d9e1ea;
+      background: #ffffff;
+    }
+    .summary-item {
+      min-height: 58px;
+      padding: 10px;
+      border: 1px solid #d9e1ea;
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .summary-label {
+      font-size: 11px;
+      color: #607287;
+      text-transform: uppercase;
+      font-weight: 750;
+    }
+    .summary-value {
+      margin-top: 5px;
+      font-size: 13px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .field-list {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+    }
+    .field {
+      border: 1px solid #d9e1ea;
+      border-radius: 8px;
+      background: #ffffff;
+      cursor: pointer;
+      transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    }
+    .field:hover,
+    .field.active {
+      border-color: #e35b19;
+      background: #fffaf7;
+      box-shadow: 0 0 0 3px rgba(227, 91, 25, 0.09);
+    }
+    .field.no-box { cursor: default; }
+    .field-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 12px 8px;
+      border-bottom: 1px solid #eef2f5;
+    }
+    .field-label {
+      font-size: 12px;
+      font-weight: 800;
+      color: #405469;
+      text-transform: uppercase;
+      line-height: 1.35;
+    }
+    .field-page {
+      flex: 0 0 auto;
+      font-size: 12px;
+      color: #607287;
+    }
+    .field-value {
+      min-height: 44px;
+      padding: 10px 12px 12px;
+      font-size: 15px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .field-evidence {
+      padding: 0 12px 12px;
+      color: #607287;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .empty {
+      margin: 18px;
+      padding: 18px;
+      border: 1px dashed #aebdcc;
+      border-radius: 8px;
+      background: #fbfcfd;
+      color: #607287;
+      line-height: 1.5;
+    }
+    .error { color: #b42318; font-weight: 700; }
+    @media (max-width: 960px) {
+      header { height: auto; align-items: stretch; flex-direction: column; padding: 14px; }
+      .toolbar { flex-wrap: wrap; }
+      input[type="file"] { width: 100%; }
+      .status { text-align: left; }
+      main { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 64px); }
+      .viewer { height: 62vh; border-right: 0; border-bottom: 1px solid #d9e1ea; }
+      .results { min-height: 50vh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NER OCR Layout Demo</h1>
+    <form id="uploadForm" class="toolbar">
+      <input id="fileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" required />
+      <button id="submitBtn" type="submit">OCR</button>
+    </form>
+    <div id="status" class="status">Sẵn sàng</div>
+  </header>
+  <main>
+    <section id="viewer" class="viewer">
+      <div class="empty">Chọn file để xem tài liệu.</div>
+    </section>
+    <aside class="results">
+      <div class="summary">
+        <div class="summary-item">
+          <div class="summary-label">Loại</div>
+          <div id="docType" class="summary-value">-</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-label">LLM</div>
+          <div id="llmInfo" class="summary-value">-</div>
+        </div>
+        <div class="summary-item">
+          <div class="summary-label">BBox</div>
+          <div id="boxCount" class="summary-value">-</div>
+        </div>
+      </div>
+      <div id="fields" class="field-list">
+        <div class="empty">Kết quả trích xuất sẽ hiển thị tại đây.</div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module">
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+
+    const form = document.getElementById("uploadForm");
+    const fileInput = document.getElementById("fileInput");
+    const submitBtn = document.getElementById("submitBtn");
+    const statusEl = document.getElementById("status");
+    const viewerEl = document.getElementById("viewer");
+    const fieldsEl = document.getElementById("fields");
+    const docTypeEl = document.getElementById("docType");
+    const llmInfoEl = document.getElementById("llmInfo");
+    const boxCountEl = document.getElementById("boxCount");
+
+    let pageOverlays = new Map();
+    let resultData = null;
+    let activeKey = null;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      resetScreen();
+      submitBtn.disabled = true;
+      statusEl.textContent = "Đang xử lý...";
+
+      try {
+        await renderLocalDocument(file);
+        const body = new FormData();
+        body.append("file", file);
+        const response = await fetch("/api/ocr/extract-layout", { method: "POST", body });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Không xử lý được tài liệu.");
+        resultData = data;
+        renderResults(data);
+        renderBoxes(data);
+        statusEl.textContent = "Hoàn tất";
+      } catch (error) {
+        statusEl.innerHTML = `<span class="error">${escapeHtml(error.message)}</span>`;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    function resetScreen() {
+      resultData = null;
+      activeKey = null;
+      pageOverlays = new Map();
+      viewerEl.innerHTML = "";
+      fieldsEl.innerHTML = `<div class="empty">Đang chờ kết quả.</div>`;
+      docTypeEl.textContent = "-";
+      llmInfoEl.textContent = "-";
+      boxCountEl.textContent = "-";
+    }
+
+    async function renderLocalDocument(file) {
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        const bytes = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
+          const viewport = page.getViewport({ scale: 1.55 });
+          const pageShell = createPageShell(pageNumber);
+          const canvas = document.createElement("canvas");
+          const context = canvas.getContext("2d");
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          pageShell.body.appendChild(canvas);
+          pageShell.body.appendChild(pageShell.overlay);
+          viewerEl.appendChild(pageShell.page);
+          pageOverlays.set(pageNumber, pageShell.overlay);
+          await page.render({ canvasContext: context, viewport }).promise;
+        }
+        return;
+      }
+
+      if (file.type.startsWith("image/")) {
+        const url = URL.createObjectURL(file);
+        const pageShell = createPageShell(1);
+        const image = document.createElement("img");
+        image.className = "page-image";
+        image.src = url;
+        pageShell.body.appendChild(image);
+        pageShell.body.appendChild(pageShell.overlay);
+        viewerEl.appendChild(pageShell.page);
+        pageOverlays.set(1, pageShell.overlay);
+        return;
+      }
+
+      viewerEl.innerHTML = `<div class="empty">Định dạng này chưa được viewer hỗ trợ.</div>`;
+    }
+
+    function createPageShell(pageNumber) {
+      const page = document.createElement("article");
+      page.className = "page";
+      page.dataset.page = String(pageNumber);
+
+      const label = document.createElement("div");
+      label.className = "page-label";
+      label.textContent = `Trang ${pageNumber}`;
+
+      const body = document.createElement("div");
+      body.className = "page-body";
+
+      const overlay = document.createElement("div");
+      overlay.className = "overlay";
+      overlay.dataset.page = String(pageNumber);
+
+      page.append(label, body);
+      return { page, body, overlay };
+    }
+
+    function renderResults(data) {
+      const extraction = data.extraction || {};
+      const fields = extraction.fields || {};
+      const boxedFields = Object.values(fields).filter((field) => field && field.box).length;
+      docTypeEl.textContent = extraction.document_type_label || extraction.document_type || "-";
+      llmInfoEl.textContent = `${data.llm?.provider || "-"} ${data.llm?.model || ""}`.trim();
+      boxCountEl.textContent = `${boxedFields}/${Object.keys(fields).length}`;
+
+      const rows = Object.entries(fields).map(([key, field]) => {
+        const value = field.value || "Không có thông tin";
+        const page = field.box ? `Trang ${field.box.page}` : "Không có bbox";
+        const evidence = field.evidence ? `<div class="field-evidence">${escapeHtml(field.evidence)}</div>` : "";
+        return `
+          <article class="field ${field.box ? "" : "no-box"}" data-field="${escapeHtml(key)}">
+            <div class="field-head">
+              <div class="field-label">${escapeHtml(field.label || key)}</div>
+              <div class="field-page">${escapeHtml(page)}</div>
+            </div>
+            <div class="field-value">${escapeHtml(value)}</div>
+            ${evidence}
+          </article>
+        `;
+      }).join("");
+
+      fieldsEl.innerHTML = rows || `<div class="empty">Không có trường kết quả.</div>`;
+      fieldsEl.querySelectorAll(".field").forEach((row) => {
+        const fieldKey = row.dataset.field;
+        row.addEventListener("mouseenter", () => activateField(fieldKey, false));
+        row.addEventListener("click", () => activateField(fieldKey, true));
+      });
+    }
+
+    function renderBoxes(data) {
+      pageOverlays.forEach((overlay) => { overlay.innerHTML = ""; });
+      const fields = data.extraction?.fields || {};
+      Object.entries(fields).forEach(([key, field]) => {
+        if (!field?.box?.bbox) return;
+        const overlay = pageOverlays.get(Number(field.box.page));
+        if (!overlay) return;
+        const box = field.box.bbox;
+        const boxEl = document.createElement("div");
+        boxEl.className = "bbox";
+        boxEl.dataset.field = key;
+        boxEl.style.left = `${box.x * 100}%`;
+        boxEl.style.top = `${box.y * 100}%`;
+        boxEl.style.width = `${box.width * 100}%`;
+        boxEl.style.height = `${box.height * 100}%`;
+        boxEl.innerHTML = `<span class="bbox-label">${escapeHtml(field.label || key)}</span>`;
+        boxEl.addEventListener("mouseenter", () => activateField(key, false));
+        boxEl.addEventListener("click", () => activateField(key, true));
+        overlay.appendChild(boxEl);
+      });
+    }
+
+    function activateField(fieldKey, scrollToBox) {
+      if (!fieldKey || activeKey === fieldKey && !scrollToBox) return;
+      activeKey = fieldKey;
+      document.querySelectorAll(".field.active, .bbox.active").forEach((el) => el.classList.remove("active"));
+      document.querySelectorAll(`[data-field="${cssEscape(fieldKey)}"]`).forEach((el) => el.classList.add("active"));
+
+      const field = resultData?.extraction?.fields?.[fieldKey];
+      if (scrollToBox && field?.box?.page) {
+        const page = viewerEl.querySelector(`.page[data-page="${field.box.page}"]`);
+        page?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+
+    function cssEscape(value) {
+      if (window.CSS?.escape) return CSS.escape(value);
+      return String(value).replace(/"/g, '\\"');
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      }[char]));
+    }
+  </script>
+</body>
+</html>

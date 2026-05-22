@@ -1,0 +1,9 @@
+fastapi==0.115.12
+uvicorn==0.23.2
+python-multipart==0.0.20
+python-dotenv==1.1.0
+httpx==0.28.1
+google-api-core==2.25.1
+google-cloud-documentai==3.5.0
+protobuf==6.31.0
+pypdf==5.9.0
