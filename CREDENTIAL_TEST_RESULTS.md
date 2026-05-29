@@ -61,9 +61,9 @@
    - Truy cập: https://console.cloud.google.com/vertex-ai/generative/language
    - Enable API và accept terms of service
    
-2. **Option 2:** Sử dụng OpenAI API thay vì Gemini
-   - Đã có `OPENAI_API_KEY` trong `.env`
-   - Ứng dụng hiện tại đã hỗ trợ OpenAI
+2. **Option 2:** Dùng Gemini API key trực tiếp
+   - Cấu hình `GEMINI_API_KEY` trong `.env`
+   - Ứng dụng ưu tiên Gemini API key trước Vertex AI Gemini
 
 ---
 
@@ -92,7 +92,7 @@ EMBEDDING_MODEL_NAME=gemini-embedding-001
 2. **Vertex AI Embeddings** - Có thể dùng cho vector embeddings
 
 ### ⚠️ Cần cấu hình thêm
-1. **Gemini Text Generation** - Cần enable API hoặc dùng OpenAI thay thế
+1. **Gemini Text Generation** - Cần enable Vertex AI Gemini hoặc cấu hình `GEMINI_API_KEY`
 
 ### 🔒 Bảo mật
 - ⚠️ **QUAN TRỌNG:** Credentials đã được exposed trong conversation
@@ -109,6 +109,6 @@ Google Cloud credentials **CÓ HỢP LỆ** và hoạt động tốt cho:
 
 Để sử dụng text generation, có 2 lựa chọn:
 1. Enable Gemini API trên Google Cloud
-2. **Tiếp tục dùng OpenAI** (đã có API key, đang hoạt động)
+2. Cấu hình `GEMINI_API_KEY` nếu dùng Gemini API key trực tiếp
 
-**Khuyến nghị:** Tiếp tục dùng OpenAI cho text generation, dùng Google Cloud cho OCR và embeddings.
+**Khuyến nghị:** Dùng Gemini cho text generation, giữ Google Cloud cho OCR và embeddings.

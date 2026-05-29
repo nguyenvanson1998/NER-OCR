@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.services.agribank_matching import attach_work_detail_matches, fetch_searchable_projects
 from app.services.extraction import CONTRACT_FORMS, CONTRACTOR_GROUPS, extract_information
 from app.services.google_document_ai_ocr import get_mime_type, ocr_document, ocr_document_with_layout
 from app.services.layout_matching import attach_field_boxes
@@ -22,7 +23,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(
     title="NER OCR Information Extraction API",
-    description="OCR tài liệu bằng Google Document AI và trích xuất thông tin bằng LLM.",
+    description="OCR tài liệu bằng Google Document AI và trích xuất thông tin local-first với Gemini fallback.",
     version="1.0.0",
 )
 
@@ -44,8 +45,48 @@ def taxonomies():
     }
 
 
+@app.get("/api/work-detail/projects")
+async def work_detail_projects():
+    api_key = os.getenv("AGRIBANK_API_KEY")
+    if not api_key:
+        return {
+            "status": "disabled",
+            "projects": [],
+            "count": 0,
+            "warnings": ["Missing AGRIBANK_API_KEY; cannot load projects."],
+        }
+
+    try:
+        projects = await fetch_searchable_projects(api_key)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "projects": [],
+            "count": 0,
+            "warnings": [f"Cannot fetch Agribank projects: {exc}"],
+        }
+
+    normalized_projects = [
+        {
+            "id": project.get("id"),
+            "code": project.get("code"),
+            "name": project.get("name"),
+            "status": project.get("status"),
+            "is_active": project.get("is_active", True),
+        }
+        for project in projects
+    ]
+    return {
+        "status": "ok",
+        "projects": normalized_projects,
+        "count": len(normalized_projects),
+        "warnings": [],
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 @app.get("/demo", response_class=HTMLResponse)
+@app.get("/demo-work-detail", response_class=HTMLResponse)
 def demo():
     return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
 
@@ -65,6 +106,7 @@ async def ocr_extract(file: Annotated[UploadFile, File(...)]):
             raise HTTPException(status_code=422, detail="OCR không trích được text từ file.")
 
         extraction = await extract_information(full_text)
+        extraction_data = await attach_work_detail_matches(extraction["data"], full_text)
         return {
             "file": {
                 "name": file.filename,
@@ -81,7 +123,7 @@ async def ocr_extract(file: Annotated[UploadFile, File(...)]):
                     for text, metadata in chunks
                 ],
             },
-            "extraction": extraction["data"],
+            "extraction": extraction_data,
             "llm": {
                 "provider": extraction["provider"],
                 "model": extraction["model"],
@@ -103,7 +145,8 @@ async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
             raise HTTPException(status_code=422, detail="OCR không trích được text từ file.")
 
         extraction = await extract_information(full_text)
-        extraction_data = attach_field_boxes(extraction["data"], layout["segments"])
+        extraction_data = await attach_work_detail_matches(extraction["data"], full_text)
+        extraction_data = attach_field_boxes(extraction_data, layout["segments"])
         return {
             "file": {
                 "name": file.filename,
@@ -139,8 +182,9 @@ async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
 @app.post("/api/llm/extract")
 async def llm_extract(request: TextExtractionRequest):
     extraction = await extract_information(request.text)
+    extraction_data = await attach_work_detail_matches(extraction["data"], request.text)
     return {
-        "extraction": extraction["data"],
+        "extraction": extraction_data,
         "llm": {
             "provider": extraction["provider"],
             "model": extraction["model"],

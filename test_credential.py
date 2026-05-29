@@ -177,7 +177,7 @@ def test_gemini_api():
                 print(f'❌ FAILED: Model không được phép sử dụng')
                 print(f'   - Project này không có quyền truy cập Gemini models')
                 print(f'   - Cần enable Vertex AI API và đăng ký sử dụng Gemini')
-                print(f'   - Hoặc sử dụng OpenAI thay vì Gemini')
+                print(f'   - Hoặc cấu hình GEMINI_API_KEY nếu dùng Gemini API key trực tiếp')
 
             else:
                 print(f'❌ FAILED: {type(e).__name__}')

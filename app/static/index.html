@@ -3,188 +3,837 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NER OCR Demo</title>
+  <title>OCR Work Detail Demo</title>
   <style>
     :root {
       color-scheme: light;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #f6f7f9;
-      color: #1f2933;
+      background: #f5f7fa;
+      color: #17212b;
+      --border: #d7e0ea;
+      --muted: #5f6f82;
+      --panel: #ffffff;
+      --soft: #f9fbfd;
+      --accent: #0f5fbf;
+      --accent-strong: #0b4d9c;
+      --warn: #9a5b00;
+      --warn-bg: #fff7e6;
+      --good: #13795b;
+      --good-bg: #e9f7f2;
+      --bad: #b42318;
+      --bad-bg: #fff1f0;
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; }
     header {
-      height: 64px;
+      min-height: 64px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 28px;
-      border-bottom: 1px solid #dde3ea;
-      background: #ffffff;
+      gap: 18px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
     }
-    h1 { margin: 0; font-size: 18px; font-weight: 700; }
-    main { display: grid; grid-template-columns: 360px 1fr; min-height: calc(100vh - 64px); }
-    aside { padding: 22px; border-right: 1px solid #dde3ea; background: #ffffff; }
-    section { padding: 22px; overflow: auto; }
-    .upload {
+    h1 { margin: 0; font-size: 18px; font-weight: 760; letter-spacing: 0; }
+    main {
       display: grid;
-      gap: 14px;
+      grid-template-columns: 380px minmax(0, 1fr);
+      min-height: calc(100vh - 64px);
+    }
+    aside {
+      border-right: 1px solid var(--border);
+      background: var(--panel);
       padding: 18px;
-      border: 1px dashed #9aa8b6;
-      border-radius: 8px;
-      background: #fbfcfd;
-    }
-    input[type="file"] { width: 100%; }
-    button {
-      height: 40px;
-      border: 0;
-      border-radius: 6px;
-      background: #135cc8;
-      color: white;
-      font-weight: 650;
-      cursor: pointer;
-    }
-    button:disabled { background: #8ba7ca; cursor: progress; }
-    .meta { margin-top: 18px; display: grid; gap: 10px; font-size: 13px; color: #52616f; }
-    .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
-    .tab {
-      border: 1px solid #ccd6e0;
-      background: #ffffff;
-      color: #263747;
-      min-width: 132px;
-    }
-    .tab.active { border-color: #135cc8; color: #135cc8; box-shadow: inset 0 -2px 0 #135cc8; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
-    .field {
-      min-height: 112px;
-      padding: 14px;
-      border: 1px solid #dde3ea;
-      border-radius: 8px;
-      background: #ffffff;
-    }
-    .label { font-size: 12px; font-weight: 700; color: #52616f; text-transform: uppercase; }
-    .value { margin-top: 8px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; }
-    .evidence { margin-top: 10px; font-size: 12px; color: #64748b; line-height: 1.4; }
-    .panel { margin-top: 18px; }
-    .panel h2 { font-size: 16px; margin: 0 0 10px; }
-    pre {
-      max-height: 380px;
       overflow: auto;
-      padding: 14px;
-      border: 1px solid #dde3ea;
-      border-radius: 8px;
-      background: #0f172a;
-      color: #e2e8f0;
-      white-space: pre-wrap;
+    }
+    section {
+      min-width: 0;
+      padding: 18px;
+      overflow: auto;
+    }
+    label {
+      display: block;
+      margin-bottom: 7px;
+      color: #314457;
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    input[type="file"],
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid #c8d4df;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #17212b;
+      font: inherit;
+      font-size: 14px;
+    }
+    input[type="file"] { padding: 9px; }
+    select {
+      height: 38px;
+      padding: 0 10px;
+    }
+    textarea {
+      min-height: 220px;
+      max-height: 45vh;
+      padding: 11px;
+      resize: vertical;
       line-height: 1.45;
     }
-    .error { color: #b42318; font-weight: 650; }
-    @media (max-width: 900px) {
+    button {
+      height: 38px;
+      padding: 0 13px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: var(--accent);
+      color: #ffffff;
+      font-weight: 750;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { background: var(--accent-strong); }
+    button:disabled { background: #8da9c9; cursor: progress; }
+    .secondary {
+      background: #ffffff;
+      border-color: #c8d4df;
+      color: #263849;
+    }
+    .secondary:hover {
+      background: #f2f5f8;
+      border-color: #b6c4d1;
+    }
+    .mode {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 4px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #f4f7fa;
+      margin-bottom: 18px;
+    }
+    .mode button {
+      height: 34px;
+      border: 0;
+      background: transparent;
+      color: #415468;
+    }
+    .mode button.active {
+      background: #ffffff;
+      color: var(--accent);
+      box-shadow: 0 1px 4px rgba(23, 33, 43, 0.12);
+    }
+    .control-panel {
+      display: grid;
+      gap: 16px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--soft);
+    }
+    .project-picker {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--soft);
+    }
+    .project-picker-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .project-picker-head label { margin-bottom: 0; }
+    .hint {
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .actions { display: flex; gap: 8px; align-items: center; }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      max-width: 380px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: #edf3fb;
+      color: #315a8a;
+      font-size: 13px;
+      font-weight: 750;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-pill.warn { background: var(--warn-bg); color: var(--warn); }
+    .status-pill.good { background: var(--good-bg); color: var(--good); }
+    .status-pill.bad { background: var(--bad-bg); color: var(--bad); }
+    .stack { display: grid; gap: 14px; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .metric,
+    .panel,
+    .field,
+    .candidate {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .metric {
+      min-height: 72px;
+      padding: 11px;
+    }
+    .metric-label,
+    .field-label,
+    .candidate-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 850;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+    .metric-value {
+      margin-top: 7px;
+      font-size: 16px;
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
+    .panel { overflow: hidden; }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 46px;
+      padding: 0 13px;
+      border-bottom: 1px solid #edf1f5;
+      background: #fbfcfd;
+    }
+    .panel-title { font-size: 14px; font-weight: 850; }
+    .panel-body { padding: 13px; }
+    .output-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 10px;
+    }
+    .field {
+      min-height: 96px;
+      padding: 12px;
+    }
+    .field.wide { grid-column: 1 / -1; }
+    .field-value {
+      margin-top: 8px;
+      min-height: 22px;
+      font-size: 15px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .field-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #eef3f8;
+      color: #415468;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .tag.good { background: var(--good-bg); color: var(--good); }
+    .tag.warn { background: var(--warn-bg); color: var(--warn); }
+    .tag.bad { background: var(--bad-bg); color: var(--bad); }
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .tab {
+      min-width: 112px;
+      background: #ffffff;
+      border-color: #c8d4df;
+      color: #33485c;
+    }
+    .tab.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: inset 0 -2px 0 var(--accent);
+    }
+    .candidate-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 10px;
+    }
+    .candidate { padding: 11px; }
+    .candidate-name {
+      margin-top: 7px;
+      font-weight: 760;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .candidate-sub {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+    pre {
+      margin: 0;
+      max-height: 460px;
+      overflow: auto;
+      padding: 13px;
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      background: #111827;
+      color: #dbeafe;
+      white-space: pre-wrap;
+      line-height: 1.45;
+      font-size: 13px;
+    }
+    .hidden { display: none !important; }
+    .empty {
+      padding: 26px;
+      border: 1px dashed #b7c5d2;
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--muted);
+      text-align: center;
+      font-weight: 650;
+    }
+    @media (max-width: 1080px) {
       main { grid-template-columns: 1fr; }
-      aside { border-right: 0; border-bottom: 1px solid #dde3ea; }
+      aside { border-right: 0; border-bottom: 1px solid var(--border); }
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      header { align-items: flex-start; flex-direction: column; padding: 14px; }
+      section, aside { padding: 12px; }
+      .summary { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; align-items: stretch; }
+      .actions button { width: 100%; }
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>NER OCR Demo</h1>
-    <span id="status">Sẵn sàng</span>
+    <h1>OCR Work Detail Demo</h1>
+    <span id="status" class="status-pill">Sẵn sàng</span>
   </header>
   <main>
     <aside>
-      <form class="upload" id="uploadForm">
-        <strong>Upload tài liệu</strong>
-        <input id="fileInput" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.doc,.docx,.html,.htm,.txt" required />
-        <button id="submitBtn" type="submit">OCR và trích xuất</button>
+      <div class="mode" aria-label="Chế độ nhập liệu">
+        <button id="fileModeBtn" class="active" type="button">File</button>
+        <button id="textModeBtn" type="button">Text</button>
+      </div>
+
+      <form id="inputForm" class="control-panel">
+        <div id="fileInputGroup">
+          <label for="fileInput">Tài liệu</label>
+          <input id="fileInput" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.doc,.docx,.html,.htm,.txt" />
+        </div>
+        <div id="textInputGroup" class="hidden">
+          <label for="textInput">OCR text</label>
+          <textarea id="textInput" spellcheck="false"></textarea>
+        </div>
+        <div class="actions">
+          <button id="submitBtn" type="submit">Chạy trích xuất</button>
+          <button id="clearBtn" class="secondary" type="button">Xóa</button>
+        </div>
       </form>
-      <div class="meta" id="meta"></div>
+
+      <div class="project-picker">
+        <div class="project-picker-head">
+          <label for="projectSelect">Dự án (executing/preparing/closed)</label>
+          <button id="reloadProjectsBtn" class="secondary" type="button">Tải lại</button>
+        </div>
+        <select id="projectSelect" disabled>
+          <option value="">Đang tải danh sách dự án...</option>
+        </select>
+        <div id="projectSelectMeta" class="hint">Danh sách dùng để kiểm tra/mapping project sau OCR.</div>
+      </div>
     </aside>
+
     <section>
-      <div class="tabs">
-        <button class="tab active" id="workTab" type="button">Chi tiết công việc</button>
-        <button class="tab" id="contractTab" type="button">Hợp đồng</button>
-      </div>
-      <div id="result" class="grid"></div>
-      <div class="panel">
-        <h2>Thông tin mặc định</h2>
-        <pre id="generic">{}</pre>
-      </div>
-      <div class="panel">
-        <h2>OCR text</h2>
-        <pre id="ocrText"></pre>
+      <div id="emptyState" class="empty">Chưa có kết quả</div>
+      <div id="dashboard" class="stack hidden">
+        <div class="summary">
+          <div class="metric">
+            <div class="metric-label">Pipeline</div>
+            <div class="metric-value" id="pipelineValue">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Confidence</div>
+            <div class="metric-value" id="confidenceValue">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Review</div>
+            <div class="metric-value" id="reviewValue">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Match</div>
+            <div class="metric-value" id="matchValue">-</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Provider</div>
+            <div class="metric-value" id="providerValue">-</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div class="panel-title">Output backend</div>
+            <button id="copyOutputBtn" class="secondary" type="button">Copy JSON</button>
+          </div>
+          <div class="panel-body">
+            <div id="workOutput" class="output-grid"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div class="panel-title">Matching dự án và công việc</div>
+            <span id="matchStatusTag" class="tag">-</span>
+          </div>
+          <div class="panel-body stack">
+            <div id="matchSummary" class="output-grid"></div>
+            <div id="candidateList" class="candidate-list"></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="tabs">
+            <button class="tab active" data-tab="fields" type="button">Fields</button>
+            <button class="tab" data-tab="ocr" type="button">OCR text</button>
+            <button class="tab" data-tab="json" type="button">Raw JSON</button>
+          </div>
+          <div id="fieldsTab" class="panel">
+            <div class="panel-head"><div class="panel-title">Field extraction</div></div>
+            <div class="panel-body">
+              <div id="fieldList" class="output-grid"></div>
+            </div>
+          </div>
+          <div id="ocrTab" class="hidden"><pre id="ocrText"></pre></div>
+          <div id="jsonTab" class="hidden"><pre id="rawJson"></pre></div>
+        </div>
       </div>
     </section>
   </main>
+
   <script>
-    const form = document.getElementById("uploadForm");
+    const form = document.getElementById("inputForm");
+    const fileModeBtn = document.getElementById("fileModeBtn");
+    const textModeBtn = document.getElementById("textModeBtn");
+    const fileInputGroup = document.getElementById("fileInputGroup");
+    const textInputGroup = document.getElementById("textInputGroup");
     const fileInput = document.getElementById("fileInput");
+    const textInput = document.getElementById("textInput");
     const submitBtn = document.getElementById("submitBtn");
+    const clearBtn = document.getElementById("clearBtn");
     const statusEl = document.getElementById("status");
-    const resultEl = document.getElementById("result");
-    const genericEl = document.getElementById("generic");
-    const ocrTextEl = document.getElementById("ocrText");
-    const metaEl = document.getElementById("meta");
-    const workTab = document.getElementById("workTab");
-    const contractTab = document.getElementById("contractTab");
+    const emptyState = document.getElementById("emptyState");
+    const dashboard = document.getElementById("dashboard");
+    const pipelineValue = document.getElementById("pipelineValue");
+    const confidenceValue = document.getElementById("confidenceValue");
+    const reviewValue = document.getElementById("reviewValue");
+    const matchValue = document.getElementById("matchValue");
+    const providerValue = document.getElementById("providerValue");
+    const workOutput = document.getElementById("workOutput");
+    const matchSummary = document.getElementById("matchSummary");
+    const matchStatusTag = document.getElementById("matchStatusTag");
+    const candidateList = document.getElementById("candidateList");
+    const fieldList = document.getElementById("fieldList");
+    const ocrText = document.getElementById("ocrText");
+    const rawJson = document.getElementById("rawJson");
+    const copyOutputBtn = document.getElementById("copyOutputBtn");
+    const projectSelect = document.getElementById("projectSelect");
+    const reloadProjectsBtn = document.getElementById("reloadProjectsBtn");
+    const projectSelectMeta = document.getElementById("projectSelectMeta");
+    let mode = "file";
     let lastData = null;
+    let projectOptions = [];
+
+    fileModeBtn.addEventListener("click", () => setMode("file"));
+    textModeBtn.addEventListener("click", () => setMode("text"));
+    clearBtn.addEventListener("click", clearAll);
+    copyOutputBtn.addEventListener("click", copyOutput);
+    reloadProjectsBtn.addEventListener("click", loadProjects);
+    projectSelect.addEventListener("change", () => renderSelectedProjectMeta(true));
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => setTab(tab.dataset.tab));
+    });
+    loadProjects();
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!fileInput.files.length) return;
-      submitBtn.disabled = true;
-      statusEl.textContent = "Đang OCR...";
-      resultEl.innerHTML = "";
-      genericEl.textContent = "{}";
-      ocrTextEl.textContent = "";
-      metaEl.innerHTML = "";
-
-      const body = new FormData();
-      body.append("file", fileInput.files[0]);
+      setBusy(true);
       try {
-        const response = await fetch("/api/ocr/extract", { method: "POST", body });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "Có lỗi khi xử lý file.");
+        const data = mode === "file" ? await runFileExtraction() : await runTextExtraction();
         lastData = data;
         render(data);
       } catch (error) {
-        statusEl.innerHTML = `<span class="error">${error.message}</span>`;
+        setStatus(error.message || "Có lỗi khi xử lý", "bad");
       } finally {
-        submitBtn.disabled = false;
+        setBusy(false);
       }
     });
 
-    workTab.addEventListener("click", () => setActive("work_detail"));
-    contractTab.addEventListener("click", () => setActive("contract"));
-
-    function render(data) {
-      const extraction = data.extraction;
-      statusEl.textContent = extraction.document_type_label;
-      metaEl.innerHTML = `
-        <div><strong>File:</strong> ${escapeHtml(data.file.name)}</div>
-        <div><strong>LLM:</strong> ${escapeHtml(data.llm.provider)} ${escapeHtml(data.llm.model || "")}</div>
-        <div><strong>Màn detect:</strong> ${escapeHtml(extraction.screen)}</div>
-      `;
-      genericEl.textContent = JSON.stringify(extraction.generic_extraction, null, 2);
-      ocrTextEl.textContent = data.ocr.text;
-      setActive(extraction.screen);
+    async function loadProjects() {
+      projectSelect.disabled = true;
+      projectSelect.innerHTML = `<option value="">Đang tải danh sách dự án...</option>`;
+      projectSelectMeta.textContent = "Đang lấy dự án (executing/preparing/closed) từ Agribank API.";
+      try {
+        const response = await fetch("/api/work-detail/projects");
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Không tải được danh sách dự án.");
+        projectOptions = Array.isArray(data.projects) ? data.projects : [];
+        renderProjectDropdown(data);
+        if (lastData?.extraction) syncProjectSelection(lastData.extraction);
+      } catch (error) {
+        projectOptions = [];
+        projectSelect.innerHTML = `<option value="">Không tải được dự án</option>`;
+        projectSelect.disabled = true;
+        projectSelectMeta.textContent = error.message || "Không tải được danh sách dự án.";
+      }
     }
 
-    function setActive(screen) {
-      if (!lastData) return;
-      workTab.classList.toggle("active", screen === "work_detail");
-      contractTab.classList.toggle("active", screen === "contract");
-      const fields = lastData.extraction.screen === screen ? lastData.extraction.fields : {};
-      resultEl.innerHTML = Object.entries(fields).map(([key, field]) => `
-        <article class="field">
-          <div class="label">${escapeHtml(field.label || key)}</div>
-          <div class="value">${escapeHtml(field.value || "Không có thông tin")}</div>
-          ${field.evidence ? `<div class="evidence">${escapeHtml(field.evidence)}</div>` : ""}
+    function renderProjectDropdown(data) {
+      if (data.status !== "ok") {
+        projectSelect.innerHTML = `<option value="">${escapeHtml(data.warnings?.[0] || "Project list chưa sẵn sàng")}</option>`;
+        projectSelect.disabled = true;
+        projectSelectMeta.textContent = data.warnings?.[0] || "Chưa có danh sách dự án.";
+        return;
+      }
+
+      if (!projectOptions.length) {
+        projectSelect.innerHTML = `<option value="">Không có dự án phù hợp</option>`;
+        projectSelect.disabled = true;
+        projectSelectMeta.textContent = "Agribank API không trả về dự án ở trạng thái executing/preparing/closed.";
+        return;
+      }
+
+      projectSelect.innerHTML = [
+        `<option value="">Chọn dự án để kiểm tra mapping...</option>`,
+        ...projectOptions.map((project) => {
+          const label = projectOptionLabel(project);
+          return `<option value="${escapeHtml(project.id)}">${escapeHtml(label)}</option>`;
+        })
+      ].join("");
+      projectSelect.disabled = false;
+      projectSelectMeta.textContent = `Đã tải ${projectOptions.length} dự án.`;
+    }
+
+    function projectOptionLabel(project) {
+      const code = project.code ? `${project.code} - ` : "";
+      const status = project.status ? ` (${project.status})` : "";
+      return `${code}${project.name || project.id || "Không tên"}${status}`;
+    }
+
+    function syncProjectSelection(extraction) {
+      if (!projectOptions.length || projectSelect.disabled) return;
+      const output = extraction.work_detail_output || {};
+      const matchedProject = extraction.work_detail_match?.project || {};
+      const projectId = output.project_id || matchedProject.id;
+      if (projectId && projectOptions.some((project) => String(project.id) === String(projectId))) {
+        projectSelect.value = projectId;
+      } else {
+        projectSelect.value = "";
+      }
+      renderSelectedProjectMeta(false);
+    }
+
+    function selectedProject() {
+      const id = projectSelect.value;
+      if (!id) return null;
+      return projectOptions.find((project) => String(project.id) === String(id)) || null;
+    }
+
+    function renderSelectedProjectMeta(shouldRefreshOutput) {
+      const project = selectedProject();
+      if (!project) {
+        if (projectOptions.length && !projectSelect.disabled) {
+          projectSelectMeta.textContent = `Đã tải ${projectOptions.length} dự án.`;
+        }
+        return;
+      }
+
+      projectSelectMeta.textContent = [
+        project.code ? `Mã: ${project.code}` : null,
+        project.name ? `Tên: ${project.name}` : null,
+        project.status ? `Trạng thái: ${project.status}` : null
+      ].filter(Boolean).join(" | ");
+
+      if (shouldRefreshOutput && lastData?.extraction?.work_detail_output) {
+        workOutput.innerHTML = renderOutputGrid(getEffectiveOutput(lastData));
+        rawJson.textContent = JSON.stringify(buildDisplayData(lastData), null, 2);
+      }
+    }
+
+    function getEffectiveOutput(data = lastData) {
+      const output = { ...(data?.extraction?.work_detail_output || {}) };
+      const project = selectedProject();
+      if (!project) return output;
+      output.project_id = project.id;
+      output.project_code = project.code || output.project_code || null;
+      output.project_name = project.name || output.project_name || null;
+      output.project_selection_source = output.project_id === data?.extraction?.work_detail_output?.project_id ? "match" : "dropdown";
+      return output;
+    }
+
+    function buildDisplayData(data) {
+      return {
+        ...data,
+        extraction: {
+          ...(data.extraction || {}),
+          work_detail_output: getEffectiveOutput(data)
+        }
+      };
+    }
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      fileModeBtn.classList.toggle("active", mode === "file");
+      textModeBtn.classList.toggle("active", mode === "text");
+      fileInputGroup.classList.toggle("hidden", mode !== "file");
+      textInputGroup.classList.toggle("hidden", mode !== "text");
+    }
+
+    async function runFileExtraction() {
+      if (!fileInput.files.length) throw new Error("Chưa chọn file.");
+      const body = new FormData();
+      body.append("file", fileInput.files[0]);
+      const response = await fetch("/api/ocr/extract", { method: "POST", body });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "OCR thất bại.");
+      return data;
+    }
+
+    async function runTextExtraction() {
+      const text = textInput.value.trim();
+      if (!text) throw new Error("Chưa có OCR text.");
+      const response = await fetch("/api/llm/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Trích xuất thất bại.");
+      return {
+        ...data,
+        file: { name: "raw-text", mime_type: "text/plain" },
+        ocr: { text, chunks: [] }
+      };
+    }
+
+    function render(data) {
+      const extraction = data.extraction || {};
+      const match = extraction.work_detail_match || {};
+      syncProjectSelection(extraction);
+      const output = getEffectiveOutput(data);
+      emptyState.classList.add("hidden");
+      dashboard.classList.remove("hidden");
+
+      const review = Boolean(extraction.needs_review || output.needs_review);
+      setStatus(review ? "Cần kiểm tra" : "Đã trích xuất", review ? "warn" : "good");
+      pipelineValue.textContent = valueOrDash(extraction.pipeline);
+      confidenceValue.textContent = formatScore(extraction.local_confidence);
+      reviewValue.textContent = review ? "Có" : "Không";
+      matchValue.textContent = valueOrDash(match.status);
+      providerValue.textContent = [data.llm?.provider, data.llm?.model].filter(Boolean).join(" / ") || "-";
+
+      workOutput.innerHTML = renderOutputGrid(output);
+      matchStatusTag.textContent = valueOrDash(match.status);
+      matchStatusTag.className = `tag ${matchTagClass(match.status, review)}`;
+      matchSummary.innerHTML = renderMatchSummary(match);
+      candidateList.innerHTML = renderCandidates(match.best_candidates || {});
+      fieldList.innerHTML = renderFields(extraction.fields || {});
+      ocrText.textContent = data.ocr?.text || "";
+      rawJson.textContent = JSON.stringify(buildDisplayData(data), null, 2);
+      setTab("fields");
+    }
+
+    function renderOutputGrid(output) {
+      const items = [
+        ["document_number", "Số văn bản"],
+        ["signed_or_effective_date", "Ngày/thời gian"],
+        ["approved_value", "Giá trị duyệt"],
+        ["submitted_value", "Giá trị trình"],
+        ["issuer", "Đơn vị phát hành"],
+        ["title", "Title"],
+        ["project_code", "Mã dự án"],
+        ["project_name", "Tên dự án"],
+        ["project_selection_source", "Nguồn chọn dự án"],
+        ["task_name", "Công việc chứng minh"],
+        ["workflow_step_id", "Workflow step id"],
+        ["workflow_step_name", "Workflow step"],
+        ["notes", "Ghi chú"]
+      ];
+      return items.map(([key, label]) => fieldCard(label, output[key], key === "title" || key === "issuer" || key === "task_name" || key === "notes")).join("");
+    }
+
+    function renderMatchSummary(match) {
+      const project = match.project || {};
+      const task = match.task || {};
+      const warnings = Array.isArray(match.warnings) ? match.warnings.join("; ") : "";
+      const tiebreaker = match.llm_tiebreaker || {};
+      const projectMeta = [
+        tag(`code: ${valueOrDash(project.code)}`),
+        tag(`score: ${formatScore(project.score)}`, scoreClass(project.score))
+      ];
+      if (tiebreaker.project) {
+        projectMeta.push(tag(`LLM: ${formatScore(tiebreaker.project.confidence)}`, "good"));
+      }
+      const taskMeta = [
+        tag(`id: ${valueOrDash(task.id)}`),
+        tag(`score: ${formatScore(task.score)}`, scoreClass(task.score))
+      ];
+      if (tiebreaker.task) {
+        taskMeta.push(tag(`LLM: ${formatScore(tiebreaker.task.confidence)}`, "good"));
+      }
+      const reasoningCards = [];
+      if (tiebreaker.project?.reasoning) {
+        reasoningCards.push(fieldCard("LLM tiebreaker (project)", tiebreaker.project.reasoning, true));
+      }
+      if (tiebreaker.task?.reasoning) {
+        reasoningCards.push(fieldCard("LLM tiebreaker (task)", tiebreaker.task.reasoning, true));
+      }
+      return [
+        fieldCard("Project", project.name || "-", true, projectMeta),
+        fieldCard("Task", task.name || "-", true, taskMeta),
+        ...reasoningCards,
+        fieldCard("Warnings", warnings || "-", true)
+      ].join("");
+    }
+
+    function renderCandidates(bestCandidates) {
+      const projects = bestCandidates.projects || [];
+      const tasks = bestCandidates.tasks || [];
+      const cards = [
+        ...projects.map((item, index) => candidateCard(`Project #${index + 1}`, item.name, item.score, item.matched_query, item.code)),
+        ...tasks.map((item, index) => candidateCard(`Task #${index + 1}`, item.name, item.score, item.matched_query, item.workflow_step_id))
+      ];
+      return cards.join("") || `<div class="empty">Không có candidate</div>`;
+    }
+
+    function renderFields(fields) {
+      return Object.entries(fields).map(([key, field]) => fieldCard(field.label || key, field.value, false, [
+        tag(`source: ${valueOrDash(field.source)}`),
+        tag(`confidence: ${formatScore(field.confidence)}`, scoreClass(field.confidence)),
+        field.evidence ? tag(`evidence: ${field.evidence}`) : ""
+      ])).join("");
+    }
+
+    function fieldCard(label, value, wide = false, meta = []) {
+      const rendered = Array.isArray(value) ? value.join("; ") : value;
+      return `
+        <article class="field ${wide ? "wide" : ""}">
+          <div class="field-label">${escapeHtml(label)}</div>
+          <div class="field-value">${escapeHtml(valueOrDash(rendered))}</div>
+          ${meta.filter(Boolean).length ? `<div class="field-meta">${meta.filter(Boolean).join("")}</div>` : ""}
         </article>
-      `).join("") || `<article class="field"><div class="value">Tài liệu này không thuộc màn đang chọn.</div></article>`;
+      `;
+    }
+
+    function candidateCard(label, name, score, matchedQuery, codeOrId) {
+      return `
+        <article class="candidate">
+          <div class="candidate-label">${escapeHtml(label)}</div>
+          <div class="candidate-name">${escapeHtml(valueOrDash(name))}</div>
+          <div class="field-meta">
+            ${tag(`score: ${formatScore(score)}`, scoreClass(score))}
+            ${tag(valueOrDash(codeOrId))}
+          </div>
+          <div class="candidate-sub">${escapeHtml(valueOrDash(matchedQuery))}</div>
+        </article>
+      `;
+    }
+
+    function tag(text, className = "") {
+      return `<span class="tag ${className}">${escapeHtml(text)}</span>`;
+    }
+
+    function scoreClass(score) {
+      const value = Number(score || 0);
+      if (value >= 0.78) return "good";
+      if (value >= 0.55) return "warn";
+      return "bad";
+    }
+
+    function matchTagClass(status, review) {
+      if (review) return "warn";
+      if (status === "matched" || status === "matched_by_llm" || status === "project_matched_by_llm_task_matched") return "good";
+      if (status === "project_matched_by_llm" || status === "project_matched_task_matched_by_llm") return "good";
+      if (status === "error" || status === "not_matched") return "bad";
+      return "";
+    }
+
+    function setTab(name) {
+      document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === name));
+      document.getElementById("fieldsTab").classList.toggle("hidden", name !== "fields");
+      document.getElementById("ocrTab").classList.toggle("hidden", name !== "ocr");
+      document.getElementById("jsonTab").classList.toggle("hidden", name !== "json");
+    }
+
+    function clearAll() {
+      fileInput.value = "";
+      textInput.value = "";
+      lastData = null;
+      dashboard.classList.add("hidden");
+      emptyState.classList.remove("hidden");
+      if (!projectSelect.disabled) {
+        projectSelect.value = "";
+        renderSelectedProjectMeta(false);
+      }
+      setStatus("Sẵn sàng");
+    }
+
+    async function copyOutput() {
+      if (!lastData) return;
+      const output = getEffectiveOutput(lastData);
+      await navigator.clipboard.writeText(JSON.stringify(output, null, 2));
+      setStatus("Đã copy output", "good");
+    }
+
+    function setBusy(isBusy) {
+      submitBtn.disabled = isBusy;
+      setStatus(isBusy ? "Đang xử lý..." : "Sẵn sàng");
+    }
+
+    function setStatus(text, tone = "") {
+      statusEl.textContent = text;
+      statusEl.className = `status-pill ${tone}`.trim();
+    }
+
+    function formatScore(score) {
+      const value = Number(score);
+      return Number.isFinite(value) ? value.toFixed(3) : "-";
+    }
+
+    function valueOrDash(value) {
+      if (value === null || value === undefined || value === "") return "-";
+      return String(value);
     }
 
     function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (char) => ({
+      return valueOrDash(value).replace(/[&<>"']/g, (char) => ({
         "&": "&amp;",
         "<": "&lt;",
         ">": "&gt;",
