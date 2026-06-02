@@ -5,6 +5,7 @@ import os
 import re
 import time
 import unicodedata
+from dataclasses import dataclass
 from typing import Any
 from typing import Optional
 
@@ -24,9 +25,52 @@ except ImportError:  # pragma: no cover - exercised only when optional dep is ab
 DEFAULT_BASE_URL = "https://agribank-be.opa.ai.vn/api/v1"
 ACTIVE_TASK_STATUSES = {"executing", "in_progress", "processing", "doing", "started"}
 SEARCHABLE_PROJECT_STATUSES = {"executing", "preparing", "closed"}
-PROJECT_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-TASK_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-TEXT_INDEX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+PROJECT_CACHE: dict[str, tuple[float, Any]] = {}
+TASK_CACHE: dict[str, tuple[float, Any]] = {}
+TEXT_INDEX_CACHE: dict[str, tuple[float, Any]] = {}
+PROJECT_TREE_ALIASES = {
+    "agribank": "agribank",
+    "argibank": "agribank",
+    "opa": "opa",
+    "opc": "opc",
+}
+PROJECT_TREE_ENV = {
+    "agribank": {
+        "display_name": "Agribank",
+        "api_key_env": "AGRIBANK_API_KEY",
+        "base_url_env": "AGRIBANK_API_BASE_URL",
+        "default_base_url": DEFAULT_BASE_URL,
+    },
+    "opa": {
+        "display_name": "OPA",
+        "api_key_env": "OPA_API_KEY",
+        "base_url_env": "OPA_API_BASE_URL",
+        "default_base_url": None,
+    },
+    "opc": {
+        "display_name": "OPC",
+        "api_key_env": "OPC_API_KEY",
+        "base_url_env": "OPC_API_BASE_URL",
+        "default_base_url": None,
+    },
+}
+
+
+@dataclass(frozen=True)
+class ProjectTreeConfig:
+    key: str
+    requested: str
+    display_name: str
+    api_key_env: str
+    base_url_env: str
+    api_key: Optional[str]
+    base_url: Optional[str]
+
+
+class ProjectTreeConfigError(RuntimeError):
+    def __init__(self, message: str, *, missing: Optional[list[str]] = None):
+        super().__init__(message)
+        self.missing = missing or []
 
 logger = logging.getLogger("agribank_matching")
 if not logger.handlers:
@@ -35,6 +79,52 @@ if not logger.handlers:
     logger.addHandler(_handler)
 logger.setLevel(os.getenv("AGRIBANK_MATCH_LOG_LEVEL", "INFO").upper())
 logger.propagate = False
+
+
+def normalize_project_tree(value: Optional[str]) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        raise ValueError("Missing project. Expected one of: opa, opc, agribank.")
+    key = PROJECT_TREE_ALIASES.get(raw)
+    if not key:
+        allowed = ", ".join(sorted({"opa", "opc", "agribank", "argibank"}))
+        raise ValueError(f"Unsupported project {value!r}. Expected one of: {allowed}.")
+    return key
+
+
+def get_project_tree_config(
+    project_tree: Optional[str] = "agribank",
+    *,
+    require_config: bool = False,
+    allow_default_base_url: bool = True,
+    api_key_override: Optional[str] = None,
+) -> ProjectTreeConfig:
+    key = normalize_project_tree(project_tree)
+    raw = str(project_tree or "").strip().lower()
+    meta = PROJECT_TREE_ENV[key]
+    env_base_url = os.getenv(str(meta["base_url_env"]))
+    base_url = env_base_url or (str(meta["default_base_url"]) if allow_default_base_url and meta.get("default_base_url") else None)
+    api_key = api_key_override if api_key_override is not None else os.getenv(str(meta["api_key_env"]))
+    config = ProjectTreeConfig(
+        key=key,
+        requested=raw,
+        display_name=str(meta["display_name"]),
+        api_key_env=str(meta["api_key_env"]),
+        base_url_env=str(meta["base_url_env"]),
+        api_key=api_key,
+        base_url=base_url,
+    )
+    if require_config:
+        missing = []
+        if not api_key:
+            missing.append(config.api_key_env)
+        if not env_base_url:
+            missing.append(config.base_url_env)
+        if missing:
+            joined = ", ".join(missing)
+            raise ProjectTreeConfigError(f"Missing project tree configuration: {joined}.", missing=missing)
+    return config
+
 
 ABBREVIATION_MAP: dict[str, str] = {
     "BC KTKT": "Báo cáo kinh tế kỹ thuật",
@@ -234,11 +324,16 @@ STOPWORDS = {
 }
 
 
-async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> dict[str, Any]:
+async def attach_work_detail_matches(
+    extraction: dict[str, Any],
+    text: str,
+    project_tree: Optional[str] = "agribank",
+) -> dict[str, Any]:
     if extraction.get("screen") != "work_detail":
         logger.debug("Skip matching: screen=%s", extraction.get("screen"))
         return extraction
 
+    config = get_project_tree_config(project_tree, allow_default_base_url=True)
     fields = extraction.get("fields") if isinstance(extraction.get("fields"), dict) else {}
     title = field_value(fields, "title") or extraction.get("generic_extraction", {}).get("document_title_or_type")
     title = str(title or "").strip()
@@ -252,6 +347,7 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
     )
     match_info: dict[str, Any] = {
         "status": "disabled",
+        "project_tree": config.key,
         "query": {
             "title": title or None,
             "project_name_candidates": project_queries[:8],
@@ -266,26 +362,29 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
         "warnings": [],
     }
 
-    api_key = os.getenv("AGRIBANK_API_KEY")
+    api_key = config.api_key
     if not api_key:
-        logger.warning("STEP skip: AGRIBANK_API_KEY missing")
-        match_info["warnings"].append("Missing AGRIBANK_API_KEY; skipped project/task matching.")
+        logger.warning("STEP skip: %s missing", config.api_key_env)
+        match_info["warnings"].append(f"Missing {config.api_key_env}; skipped project/task matching.")
         extraction["work_detail_match"] = match_info
         extraction["work_detail_output"] = build_work_detail_output(extraction)
         return extraction
 
     try:
-        projects = await fetch_searchable_projects(api_key)
+        if config.key == "agribank":
+            projects = await fetch_searchable_projects(api_key)
+        else:
+            projects = await fetch_searchable_projects(api_key, config.key)
         logger.info("STEP fetch_projects | count=%d", len(projects))
     except Exception as exc:
         logger.error("STEP fetch_projects FAILED: %s", exc)
         match_info["status"] = "error"
-        match_info["warnings"].append(f"Cannot fetch Agribank projects: {exc}")
+        match_info["warnings"].append(f"Cannot fetch {config.display_name} projects: {exc}")
         extraction["work_detail_match"] = match_info
         extraction["work_detail_output"] = build_work_detail_output(extraction)
         return extraction
 
-    project_candidates = rank_projects(project_queries, projects)
+    project_candidates = rank_projects(project_queries, projects, cache_key=f"{config.key}:projects:searchable")
     match_info["best_candidates"]["projects"] = project_candidates[:3]
     project_match = project_candidates[0] if project_candidates else None
     project_threshold = env_float("PROJECT_MATCH_THRESHOLD", env_float("AGRIBANK_PROJECT_MATCH_THRESHOLD", 0.78))
@@ -309,12 +408,21 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
                 project_threshold,
                 min(len(project_candidates), llm_tiebreaker_top_n()),
             )
-            tiebreaker_result = await llm_pick_project(
-                text,
-                title,
-                project_queries,
-                project_candidates[: llm_tiebreaker_top_n()],
-            )
+            if config.key == "agribank":
+                tiebreaker_result = await llm_pick_project(
+                    text,
+                    title,
+                    project_queries,
+                    project_candidates[: llm_tiebreaker_top_n()],
+                )
+            else:
+                tiebreaker_result = await llm_pick_project(
+                    text,
+                    title,
+                    project_queries,
+                    project_candidates[: llm_tiebreaker_top_n()],
+                    tree_name=config.display_name,
+                )
             logger.info("STEP project_tiebreaker result=%s", tiebreaker_result)
             if tiebreaker_result:
                 match_info.setdefault("llm_tiebreaker", {})["project"] = tiebreaker_result
@@ -342,25 +450,28 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
                 match_info["best_project_candidate"] = project_candidates[0]
                 match_info["warnings"].append("Best project candidate is below threshold.")
             else:
-                match_info["warnings"].append("No searchable projects returned by Agribank API.")
+                match_info["warnings"].append(f"No searchable projects returned by {config.display_name} API.")
             extraction["needs_review"] = True
             extraction["work_detail_match"] = match_info
             extraction["work_detail_output"] = build_work_detail_output(extraction)
             return extraction
 
     try:
-        tasks = await fetch_project_tasks(api_key, str(project_match["id"]))
+        if config.key == "agribank":
+            tasks = await fetch_project_tasks(api_key, str(project_match["id"]))
+        else:
+            tasks = await fetch_project_tasks(api_key, str(project_match["id"]), config.key)
         leaf_count = len(filter_leaf_tasks(tasks))
         logger.info("STEP fetch_tasks | total=%d | leaves=%d", len(tasks), leaf_count)
     except Exception as exc:
         logger.error("STEP fetch_tasks FAILED: %s", exc)
         match_info["status"] = "project_matched_task_error"
-        match_info["warnings"].append(f"Cannot fetch Agribank tasks: {exc}")
+        match_info["warnings"].append(f"Cannot fetch {config.display_name} tasks: {exc}")
         extraction["work_detail_match"] = match_info
         extraction["work_detail_output"] = build_work_detail_output(extraction)
         return extraction
 
-    task_candidates = rank_tasks(task_queries, tasks, str(project_match["id"]))
+    task_candidates = rank_tasks(task_queries, tasks, str(project_match["id"]), project_tree=config.key)
     match_info["best_candidates"]["tasks"] = task_candidates[:3]
     task_match = task_candidates[0] if task_candidates else None
     task_threshold = env_float("TASK_MATCH_THRESHOLD", env_float("AGRIBANK_TASK_MATCH_THRESHOLD", 0.55))
@@ -387,13 +498,23 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
                 task_threshold,
                 min(len(task_candidates), llm_tiebreaker_top_n()),
             )
-            tiebreaker_task = await llm_pick_task(
-                text,
-                title,
-                project_match,
-                task_queries,
-                task_candidates[: llm_tiebreaker_top_n()],
-            )
+            if config.key == "agribank":
+                tiebreaker_task = await llm_pick_task(
+                    text,
+                    title,
+                    project_match,
+                    task_queries,
+                    task_candidates[: llm_tiebreaker_top_n()],
+                )
+            else:
+                tiebreaker_task = await llm_pick_task(
+                    text,
+                    title,
+                    project_match,
+                    task_queries,
+                    task_candidates[: llm_tiebreaker_top_n()],
+                    tree_name=config.display_name,
+                )
             if tiebreaker_task:
                 logger.info("STEP task_tiebreaker result=%s", tiebreaker_task)
                 match_info.setdefault("llm_tiebreaker", {})["task"] = tiebreaker_task
@@ -447,13 +568,14 @@ async def attach_work_detail_matches(extraction: dict[str, Any], text: str) -> d
     return extraction
 
 
-async def fetch_searchable_projects(api_key: str) -> list[dict[str, Any]]:
-    cache_key = "searchable_projects"
+async def fetch_searchable_projects(api_key: str, project_tree: Optional[str] = "agribank") -> list[dict[str, Any]]:
+    config = get_project_tree_config(project_tree, allow_default_base_url=True, api_key_override=api_key)
+    cache_key = f"{config.key}:searchable_projects"
     cached = get_cache(PROJECT_CACHE, cache_key)
     if cached is not None:
         return cached
 
-    projects = await fetch_paginated(api_key, "project/internal", {})
+    projects = await fetch_paginated(api_key, "project/internal", {}, project_tree=config.key)
     projects = [
         project
         for project in projects
@@ -464,13 +586,14 @@ async def fetch_searchable_projects(api_key: str) -> list[dict[str, Any]]:
     return projects
 
 
-async def fetch_project_tasks(api_key: str, project_id: str) -> list[dict[str, Any]]:
-    cache_key = f"tasks:{project_id}"
+async def fetch_project_tasks(api_key: str, project_id: str, project_tree: Optional[str] = "agribank") -> list[dict[str, Any]]:
+    config = get_project_tree_config(project_tree, allow_default_base_url=True, api_key_override=api_key)
+    cache_key = f"{config.key}:tasks:{project_id}"
     cached = get_cache(TASK_CACHE, cache_key)
     if cached is not None:
         return cached
 
-    tasks = await fetch_paginated(api_key, "task/internal", {"project_id": project_id})
+    tasks = await fetch_paginated(api_key, "task/internal", {"project_id": project_id}, project_tree=config.key)
     set_cache(TASK_CACHE, cache_key, tasks)
     return tasks
 
@@ -496,10 +619,11 @@ async def llm_pick_project(
     title: str,
     queries: list[str],
     candidates: list[dict[str, Any]],
+    tree_name: str = "Agribank",
 ) -> Optional[dict[str, Any]]:
     if not candidates:
         return None
-    prompt = build_project_tiebreaker_prompt(text, title, queries, candidates)
+    prompt = build_project_tiebreaker_prompt(text, title, queries, candidates, tree_name=tree_name)
     response, error = await call_llm_tiebreaker(prompt)
     if error:
         return {"error": error}
@@ -515,10 +639,11 @@ async def llm_pick_task(
     project: dict[str, Any],
     queries: list[str],
     candidates: list[dict[str, Any]],
+    tree_name: str = "Agribank",
 ) -> Optional[dict[str, Any]]:
     if not candidates:
         return None
-    prompt = build_task_tiebreaker_prompt(text, title, project, queries, candidates)
+    prompt = build_task_tiebreaker_prompt(text, title, project, queries, candidates, tree_name=tree_name)
     response, error = await call_llm_tiebreaker(prompt)
     if error:
         return {"error": error}
@@ -585,6 +710,7 @@ def build_project_tiebreaker_prompt(
     title: str,
     queries: list[str],
     candidates: list[dict[str, Any]],
+    tree_name: str = "Agribank",
 ) -> str:
     snippet = tiebreaker_text_snippet(text)
     compact_candidates = [
@@ -598,7 +724,7 @@ def build_project_tiebreaker_prompt(
         for candidate in candidates
     ]
     return f"""
-Bạn là tiebreaker chọn project Agribank cho 1 tài liệu OCR tiếng Việt.
+	Bạn là tiebreaker chọn project {tree_name} cho 1 tài liệu OCR tiếng Việt.
 Local matcher đã rank và đưa danh sách candidates dưới đây nhưng KHÔNG có item nào vượt threshold.
 Hãy đọc tiêu đề + đoạn OCR + các query rồi quyết định project nào ĐÚNG nhất.
 
@@ -613,7 +739,7 @@ Title (rule local): {json.dumps(title or "", ensure_ascii=False)}
 
 Project name candidates (sinh từ rule local): {json.dumps(queries[:6], ensure_ascii=False)}
 
-Candidates từ Agribank API (tối đa {len(compact_candidates)}):
+	Candidates từ {tree_name} API (tối đa {len(compact_candidates)}):
 {json.dumps(compact_candidates, ensure_ascii=False, indent=2)}
 
 Đoạn OCR đã rút gọn:
@@ -634,6 +760,7 @@ def build_task_tiebreaker_prompt(
     project: dict[str, Any],
     queries: list[str],
     candidates: list[dict[str, Any]],
+    tree_name: str = "Agribank",
 ) -> str:
     snippet = tiebreaker_text_snippet(text)
     compact_candidates = [
@@ -653,7 +780,7 @@ def build_task_tiebreaker_prompt(
         "name": project.get("name"),
     }
     return f"""
-Bạn là tiebreaker chọn task/công việc Agribank cho 1 tài liệu OCR đã match đúng project.
+	Bạn là tiebreaker chọn task/công việc {tree_name} cho 1 tài liệu OCR đã match đúng project.
 Local matcher đưa danh sách candidates dưới đây nhưng không có item nào vượt threshold.
 Hãy đọc tiêu đề + đoạn OCR + các query rồi quyết định task nào ĐÚNG nhất.
 
@@ -706,11 +833,19 @@ def tiebreaker_text_snippet(text: str) -> str:
     return head
 
 
-async def fetch_paginated(api_key: str, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-    base_url = os.getenv("AGRIBANK_API_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
-    page_size = int(os.getenv("AGRIBANK_PAGE_SIZE", "100"))
-    max_pages = int(os.getenv("AGRIBANK_MAX_PAGES", "10"))
-    timeout = float(os.getenv("AGRIBANK_TIMEOUT_SECONDS", "15"))
+async def fetch_paginated(
+    api_key: str,
+    path: str,
+    params: dict[str, Any],
+    project_tree: Optional[str] = "agribank",
+) -> list[dict[str, Any]]:
+    config = get_project_tree_config(project_tree, allow_default_base_url=True, api_key_override=api_key)
+    if not config.base_url:
+        raise ProjectTreeConfigError(f"Missing {config.base_url_env}.", missing=[config.base_url_env])
+    base_url = config.base_url.rstrip("/")
+    page_size = int(os.getenv(f"{config.key.upper()}_PAGE_SIZE", os.getenv("AGRIBANK_PAGE_SIZE", "100")))
+    max_pages = int(os.getenv(f"{config.key.upper()}_MAX_PAGES", os.getenv("AGRIBANK_MAX_PAGES", "10")))
+    timeout = float(os.getenv(f"{config.key.upper()}_TIMEOUT_SECONDS", os.getenv("AGRIBANK_TIMEOUT_SECONDS", "15")))
     items: list[dict[str, Any]] = []
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -745,9 +880,13 @@ def find_best_task(queries: list[str], tasks: list[dict[str, Any]]) -> Optional[
     return candidates[0] if candidates else None
 
 
-def rank_projects(queries: list[str], projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def rank_projects(
+    queries: list[str],
+    projects: list[dict[str, Any]],
+    cache_key: str = "agribank:projects:searchable",
+) -> list[dict[str, Any]]:
     candidate_texts = [" ".join(str(project.get(key) or "") for key in ("name", "code")) for project in projects]
-    scored = rank_records(queries, projects, candidate_texts, cache_key="projects:searchable")
+    scored = rank_records(queries, projects, candidate_texts, cache_key=cache_key)
     return [
         {
             "id": project.get("id"),
@@ -769,7 +908,12 @@ def filter_leaf_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [task for task in tasks if str(task.get("id")) not in parent_ids]
 
 
-def rank_tasks(queries: list[str], tasks: list[dict[str, Any]], project_id: str) -> list[dict[str, Any]]:
+def rank_tasks(
+    queries: list[str],
+    tasks: list[dict[str, Any]],
+    project_id: str,
+    project_tree: str = "agribank",
+) -> list[dict[str, Any]]:
     leaf_tasks = filter_leaf_tasks(tasks)
     candidate_texts = []
     for task in leaf_tasks:
@@ -786,7 +930,7 @@ def rank_tasks(queries: list[str], tasks: list[dict[str, Any]], project_id: str)
             )
         )
 
-    scored = rank_records(queries, leaf_tasks, candidate_texts, cache_key=f"tasks:leaves:{project_id}")
+    scored = rank_records(queries, leaf_tasks, candidate_texts, cache_key=f"{project_tree}:tasks:leaves:{project_id}")
     results = []
     for task, score_payload in scored:
         workflow_step = task.get("workflow_step") if isinstance(task.get("workflow_step"), dict) else {}

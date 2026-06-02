@@ -1567,8 +1567,10 @@ async def extract_information(text: str) -> dict[str, Any]:
         try:
             parsed = await call_llm_extraction(llm_config, prompt)
             data = normalize_result(parsed, text, payload_source="llm")
-            data["pipeline"] = "llm_first"
+            data["pipeline"] = "local_with_llm_fallback" if llm_mode == "entity_extraction" else "llm"
             data["llm_extraction_mode"] = llm_mode
+            data["llm_fallback_used"] = True
+            data["llm_entity_extraction_used"] = llm_mode == "entity_extraction"
             if local_data:
                 data["local_confidence"] = local_data["local_confidence"]
             data["needs_review"] = calculate_local_confidence(data) < env_float("LOCAL_CONFIDENCE_THRESHOLD", 0.68)
@@ -1582,8 +1584,8 @@ async def extract_information(text: str) -> dict[str, Any]:
             if local_enabled:
                 if local_data is None:
                     local_data = normalize_result({}, text, payload_source="rule")
-                local_data["pipeline"] = "local_fallback_from_llm"
-                local_data["llm_error"] = compact_error(exc)
+                local_data["pipeline"] = "local"
+                local_data["llm_fallback_error"] = compact_error(exc)
                 local_data["needs_review"] = True
                 return {
                     "provider": "local",
@@ -1605,7 +1607,7 @@ async def extract_information(text: str) -> dict[str, Any]:
     # Priority 2: No LLM available, use local parser
     if local_enabled:
         data = normalize_result({}, text, payload_source="rule")
-        data["pipeline"] = "local_only"
+        data["pipeline"] = "local"
         return {
             "provider": "local",
             "model": None,
@@ -2021,7 +2023,7 @@ def select_entity_extraction_text(text: str) -> str:
     if not lines:
         return text[:max_chars]
 
-    selected = lines[: min(120, len(lines))]
+    selected = lines[: min(100, len(lines))]
     keywords = (
         "gia tri",
         "gia goi thau",
@@ -2041,7 +2043,7 @@ def select_entity_extraction_text(text: str) -> str:
         "ghi chu",
         "luu y",
     )
-    for line in lines[120:]:
+    for line in lines[100:]:
         normalized = normalize_for_rules(line)
         if any(keyword in normalized for keyword in keywords):
             selected.append(line)
