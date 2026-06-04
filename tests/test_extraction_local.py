@@ -77,7 +77,38 @@ def test_gemini_entity_extraction_uses_compact_prompt(monkeypatch):
     assert result["data"]["llm_entity_extraction_used"] is True
     assert result["data"]["llm_extraction_mode"] == "entity_extraction"
     assert "SECRET_TAIL_299" not in captured["prompt"]
-    assert len(captured["prompt"]) < len(text) + 2000
+    assert len(captured["prompt"]) < len(text) + 1200
+
+
+def test_document_prompt_keeps_critical_guardrails_compact(monkeypatch):
+    text = """
+NGÂN HÀNG NÔNG NGHIỆP
+Số: 5.7.7.1. /NHNo-QLĐT
+Hà Nội, ngày 29 tháng 6 năm 2021
+CÔNG VĂN
+Về chấp thuận phương án thiết kế kiến trúc công trình Trụ sở Agribank chi nhánh huyện Trấn Yên
+Căn cứ Quyết định số 873/QĐ-HĐTV-QLĐT ngày 31/12/2020 của Hội đồng thành viên Agribank;
+TỔNG MỨC ĐẦU TƯ
+26.000.000.000
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    local_data = extraction.normalize_result({}, text, payload_source="rule")
+    prompt = extraction.build_entity_extraction_prompt(text, local_data)
+
+    assert "CÔNG VĂN ĐẾN" in prompt
+    assert "Số đến" in prompt
+    assert "Ngày đến" in prompt
+    assert "Căn cứ" in prompt and "KHÔNG lấy ngày" in prompt
+    assert "Tổng mức đầu tư: 26 tỷ đồng" in prompt
+    assert "26000000000" in prompt
+    assert "document_number" in prompt
+    assert "signed_or_effective_date" in prompt
+    assert "approved_value" in prompt
+    assert "task_title_candidates" in prompt
+    assert '"v":' in prompt
+    assert '"value":string|null' in prompt
+    assert len(prompt) < 3600
 
 
 def test_fallback_disabled_does_not_call_llm(monkeypatch):
@@ -155,6 +186,151 @@ Giá trị trình duyệt: 12.500.000.000 đồng
 
     assert fields["approved_value"]["normalized_value"] == 12345000000
     assert fields["submitted_value"]["normalized_value"] == 12500000000
+
+
+def test_document_number_and_total_investment_are_normalized(monkeypatch):
+    text = """
+NGÂN HÀNG NÔNG NGHIỆP
+Số: 5.7.7.1. /NHNo-QLĐT
+Hà Nội, ngày 04 tháng 06 năm 2026
+CÔNG VĂN
+Về việc chấp thuận phương án kiến trúc công trình Trụ sở Agribank chi nhánh Trấn Yên, Yên Bái
+Tổng mức đầu tư: 26 tỷ đồng.
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(text))
+    fields = result["data"]["fields"]
+
+    assert fields["document_number"]["value"] == "5771/NHNo-QLĐT"
+    assert fields["document_number"]["normalized_value"] == "5771/NHNo-QLĐT"
+    assert fields["approved_value"]["value"] == "26 tỷ"
+    assert fields["approved_value"]["normalized_value"] == 26000000000
+    assert "Tổng mức đầu tư" in fields["approved_value"]["evidence"]
+
+
+def test_filename_hint_can_recover_missing_document_number_digit():
+    data = {
+        "fields": {
+            "document_number": {
+                "value": "571/NHNo-QLĐT",
+                "normalized_value": "571/NHNo-QLĐT",
+                "source": "rule",
+            }
+        },
+        "notes": [],
+    }
+
+    extraction.apply_filename_document_number_hint(
+        data,
+        "5771.NHNo-QLDT Ve chap thuan PAKT cong trinh Tru so.pdf",
+    )
+
+    assert data["fields"]["document_number"]["value"] == "5771/NHNo-QLĐT"
+    assert data["fields"]["document_number"]["normalized_value"] == "5771/NHNo-QLĐT"
+    assert "5771/NHNo-QLĐT" in data["notes"][0]
+
+
+def test_header_date_with_ocr_month_dots_is_normalized(monkeypatch):
+    text = """
+NGÂN HÀNG NÔNG NGHIỆP
+Số: 5771/NHNo-QLĐT
+Hà Nội, ngày 29 tháng 6.. năm 2021
+Về chấp thuận phương án thiết kế kiến trúc công trình
+Căn cứ Quyết định số 873/QĐ-HĐTV-QLĐT ngày 31/12/2020 của Hội đồng thành viên Agribank;
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(text))
+    fields = result["data"]["fields"]
+
+    assert fields["signed_or_effective_date"]["value"] == "29/06/2021"
+    assert fields["signed_or_effective_date"]["normalized_value"] == "2021-06-29"
+
+
+def test_submitted_total_investment_is_not_used_as_approved_value(monkeypatch):
+    text = """
+Số: 01/TTr-BQLDA
+Hà Nội, ngày 04 tháng 06 năm 2026
+TỜ TRÌNH
+Về việc trình phê duyệt chủ trương đầu tư
+Tổng mức đầu tư đề nghị: 26 tỷ đồng.
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(text))
+    fields = result["data"]["fields"]
+
+    assert fields["approved_value"]["value"] is None
+    assert fields["submitted_value"]["normalized_value"] == 26000000000
+
+
+def test_total_investment_table_ignores_area_and_unit_price_numbers(monkeypatch):
+    text = """
+Số: 5771/NHNo-QLĐT
+Hà Nội, ngày 29 tháng 6 năm 2021
+CÔNG VĂN
+Về chấp thuận phương án thiết kế kiến trúc công trình Trụ sở Agribank chi nhánh huyện Trấn Yên
+d. Phương án thiết kế, dự kiến tổng mức đầu tư theo các bảng thống kê sau:
+Bảng 3. Tổng mức đầu tư xây dựng (dự kiến):
+Tầng 1,2,3
+m2
+1.261
+8.500.000 10.718.500.000
+IV Chi phí dự phòng (Gdp)
+2.067.165.000
+TỔNG MỨC ĐẦU TƯ
+Gxd+Gtb+Gk+Gdp
+26.000.000.000
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(text))
+    fields = result["data"]["fields"]
+
+    assert fields["approved_value"]["value"] == "26.000.000.000"
+    assert fields["approved_value"]["normalized_value"] == 26000000000
+    assert "TỔNG MỨC ĐẦU TƯ" in fields["approved_value"]["evidence"]
+
+
+def test_noisy_incoming_stamp_does_not_override_decision_fields(monkeypatch):
+    text = """
+NGÂN HÀNG NÔNG NGHIỆP
+VÀ PHÁT TRIỂN NÔNG THÔN VIỆT NAM
+Số: 784/QĐ-NHNo-QLĐT
+CÔNG VĂN ĐẾN
+Số 193
+CỘNG HOÀ XÃ HỘI CHỦ NGHĨA VIỆT NAM
+Độc lập - Tự do - Hạnh phúc
+Hà Nội, ngày. D.4 tháng 5 năm 2018.
+QUYẾT ĐỊNH
+Ngày 7 tháng 5 năm 2018 Về thành lập Ban điều hành dự án đầu tư xây dựng
+Công trình: Trụ sở Agribank chi nhánh huyện Đan Phượng, Hà Tây.
+TỔNG GIÁM ĐỐC
+NGÂN HÀNG NÔNG NGHIỆP VÀ PHÁT TRIỂN NÔNG THÔN VIỆT NAM
+Điều 3. Quyết định này có hiệu lực từ ngày ký cho đến khi kết thúc dự án.
+"""
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(text))
+    fields = result["data"]["fields"]
+
+    assert result["data"]["document_intent"] == "quyet_dinh"
+    assert fields["document_number"]["value"] == "784/QĐ-NHNo-QLĐT"
+    assert fields["signed_or_effective_date"]["value"] == "04/05/2018"
+    assert fields["signed_or_effective_date"]["normalized_value"] == "2018-05-04"
+    assert fields["title"]["value"].startswith("QUYẾT ĐỊNH Về thành lập Ban điều hành")
+    assert "Số 193" not in fields["document_number"]["evidence"]
 
 
 def test_gemini_entities_are_kept_for_matching(monkeypatch):

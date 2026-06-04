@@ -22,7 +22,7 @@ def test_contract_rules_extract_core_fields(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "none")
     monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
 
-    result = asyncio.run(extraction.extract_information(CONTRACT_TEXT))
+    result = asyncio.run(extraction.extract_information(CONTRACT_TEXT, extraction_type="contract"))
     data = result["data"]
     fields = data["fields"]
 
@@ -43,9 +43,24 @@ def test_contract_rules_extract_core_fields(monkeypatch):
     assert fields["advance_guarantee_value"]["normalized_value"] == 200000000
     assert fields["advance_guarantee_end_date"]["normalized_value"] == "2018-07-31"
 
+    assert "work_detail_fields" not in data
+
+
+def test_default_extraction_type_is_document(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    result = asyncio.run(extraction.extract_information(CONTRACT_TEXT))
+    data = result["data"]
+
+    assert data["document_type"] == "document"
+    assert data["screen"] == "work_detail"
+    assert "contract_number" not in data["fields"]
+    assert "document_number" in data["fields"]
+
 
 def test_contract_prompt_uses_pdf_rules():
-    local_data = extraction.normalize_result({}, CONTRACT_TEXT, payload_source="rule")
+    local_data = extraction.normalize_result({}, CONTRACT_TEXT, payload_source="rule", extraction_type="contract")
     prompt = extraction.build_entity_extraction_prompt(CONTRACT_TEXT, local_data)
 
     assert "Luật bóc tách hợp đồng" in prompt
@@ -53,3 +68,4 @@ def test_contract_prompt_uses_pdf_rules():
     assert "contract_value" in prompt
     assert "performance_guarantee_value" in prompt
     assert "Tên công việc là field mapping" in prompt
+    assert "work_detail_fields" not in prompt

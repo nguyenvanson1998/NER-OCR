@@ -6,11 +6,21 @@ from typing import Optional
 
 
 def attach_field_boxes(extraction: dict[str, Any], segments: list[dict[str, Any]]) -> dict[str, Any]:
-    fields = extraction.get("fields", {})
-    if not isinstance(fields, dict):
-        return extraction
-
     used_segment_ids: set[str] = set()
+    attach_boxes_to_field_group(extraction.get("fields", {}), segments, used_segment_ids, "field")
+    attach_boxes_to_field_group(extraction.get("work_detail_fields", {}), segments, used_segment_ids, "work-detail")
+    return extraction
+
+
+def attach_boxes_to_field_group(
+    fields: Any,
+    segments: list[dict[str, Any]],
+    used_segment_ids: set[str],
+    box_prefix: str,
+) -> None:
+    if not isinstance(fields, dict):
+        return
+
     for field_key, field in fields.items():
         if not isinstance(field, dict):
             continue
@@ -20,7 +30,7 @@ def attach_field_boxes(extraction: dict[str, Any], segments: list[dict[str, Any]
             segment, score = match
             used_segment_ids.add(segment["id"])
             field["box"] = {
-                "id": f"box-{field_key}",
+                "id": f"box-{box_prefix}-{field_key}",
                 "field_key": field_key,
                 "page": segment["page"],
                 "bbox": segment["bbox"],
@@ -30,8 +40,6 @@ def attach_field_boxes(extraction: dict[str, Any], segments: list[dict[str, Any]
             }
         else:
             field["box"] = None
-
-    return extraction
 
 
 def find_best_segment(

@@ -161,7 +161,9 @@ def _page_layout_segments(doc: documentai.Document, page_offset: int = 0) -> lis
         page_number = page.page_number + page_offset
         page_width = float(page.dimension.width or 0)
         page_height = float(page.dimension.height or 0)
-        page_segments = list(page.paragraphs) or list(page.blocks) or list(page.tokens)
+        page_lines = list(getattr(page, "lines", []))
+        page_segments = page_lines or list(page.paragraphs) or list(page.blocks) or list(page.tokens)
+        segment_type = "line" if page_lines else "paragraph" if page.paragraphs else "block" if page.blocks else "token"
         for index, item in enumerate(page_segments):
             text = re.sub(r"\s+", " ", _get_text_from_anchor(item.layout.text_anchor, doc.text)).strip()
             bbox = _bbox_from_layout(item.layout, page_width=page_width, page_height=page_height)
@@ -171,7 +173,7 @@ def _page_layout_segments(doc: documentai.Document, page_offset: int = 0) -> lis
                 {
                     "id": f"p{page_number}-s{index}",
                     "page": page_number,
-                    "type": "paragraph" if page.paragraphs else "block" if page.blocks else "token",
+                    "type": segment_type,
                     "text": text,
                     "bbox": bbox,
                 }

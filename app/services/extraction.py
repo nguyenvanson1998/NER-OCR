@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -8,6 +9,8 @@ from typing import Any
 from typing import Optional
 
 import httpx
+
+from app.services.ocr_cleaning import clean_ocr_plain_text
 
 CONTRACT_FORMS = [
     "Hợp đồng trọn gói",
@@ -64,6 +67,9 @@ CONTRACT_FIELDS = {
 }
 
 
+EXTRACTION_TYPES = {"document", "contract"}
+DEFAULT_EXTRACTION_TYPE = "document"
+
 WORK_DETAIL_CONFIDENCE_FIELDS = (
     "document_number",
     "signed_or_effective_date",
@@ -76,28 +82,63 @@ LLM_SYSTEM_INSTRUCTION = (
     "quyết định, biên bản họp, tờ trình, hóa đơn, công văn trong dự án xây dựng. "
     "Chỉ trả JSON hợp lệ, không markdown. Nếu thiếu thông tin, để value là null "
     "và vẫn trả generic_extraction. "
+    "Bỏ qua các dấu/overlay không thuộc nội dung văn bản như CÔNG VĂN ĐẾN, "
+    "Số đến, Ngày đến, con dấu tròn, mã số doanh nghiệp trên con dấu và các mảnh chữ bị chèn từ dấu. "
     "QUY TẮC NGÀY THÁNG (BẮT BUỘC): với mọi field ngày (signed_or_effective_date, "
     "signed_date, performance_guarantee_end_date, advance_guarantee_end_date): "
     "đặt value theo định dạng DD/MM/YYYY và normalized_value theo định dạng "
     "ISO YYYY-MM-DD. Tuyệt đối KHÔNG để value là nguyên văn 'ngày XX tháng YY năm ZZZZ'. "
-    "Nếu chỉ có ngày + tháng mà thiếu năm, để cả hai field là null."
+    "Nếu chỉ có ngày + tháng mà thiếu năm, để cả hai field là null. "
+    "VỊ TRÍ NGÀY BAN HÀNH (signed_or_effective_date): LUÔN là dòng địa danh + ngày "
+    "(ví dụ 'Hà Nội, ngày 16 tháng 12 năm 2021', 'TP. Hồ Chí Minh, ngày ...') nằm "
+    "NGAY DƯỚI tiêu ngữ 'Độc lập - Tự do - Hạnh phúc' ở góc phải/đầu văn bản. "
+    "TUYỆT ĐỐI KHÔNG lấy ngày trong phần 'Căn cứ ...', 'Luật số ... ngày ...', "
+    "'Nghị định ... ngày ...', 'Thông tư ... ngày ...', 'Quyết định số ... ngày ...', "
+    "'Công văn số ... ngày ...' hoặc bất kỳ trích dẫn pháp lý nào — đó là ngày của "
+    "văn bản được tham chiếu, KHÔNG phải ngày ban hành văn bản hiện tại. "
+    "Nếu không tìm thấy dòng 'địa danh, ngày ... tháng ... năm ...' dưới tiêu ngữ, "
+    "để signed_or_effective_date = null thay vì lấy đại một ngày khác."
 )
+
+COMMON_EXTRACTION_RULES = (
+    "Chỉ trả JSON hợp lệ, không markdown. Chỉ lấy thông tin có chứng cứ; thiếu thì để null. "
+    "Bỏ qua stamp/overlay OCR như CÔNG VĂN ĐẾN, Số đến, Ngày đến, con dấu, mã số DN và mảnh chữ từ dấu."
+)
+
+DOCUMENT_FIELD_RULES = """
+Rules document:
+- document_number: số văn bản ở đầu tài liệu; giữ dạng đã chuẩn hóa như 5771/NHNo-QLĐT.
+- signed_or_effective_date: BẮT BUỘC lấy từ dòng "<Địa danh>, ngày DD tháng MM năm YYYY" nằm NGAY DƯỚI tiêu ngữ "Độc lập - Tự do - Hạnh phúc" (góc phải/đầu văn bản). value=DD/MM/YYYY, normalized_value=YYYY-MM-DD. KHÔNG lấy ngày trong "Căn cứ ...", Luật/Nghị định/Thông tư/Quyết định số/Công văn số (đó là ngày của văn bản tham chiếu, không phải ngày ban hành). Nếu không tìm được dòng địa danh + ngày dưới tiêu ngữ thì để null.
+- approved_value: giá trị duyệt/phê duyệt/sau thẩm định; gồm giá gói thầu, giá dự toán gói thầu, tổng mức đầu tư/xây dựng/dự toán/kinh phí. Ví dụ "Tổng mức đầu tư: 26 tỷ đồng" => 26000000000.
+- submitted_value: giá trị trình/đề nghị/xin phê duyệt/trình duyệt/trước thẩm định.
+- issuer: đơn vị phát hành góc trái đầu tài liệu, không lấy Kính gửi.
+- title: loại văn bản + dòng Về việc/V/v/trích yếu nếu có; bắt đầu bằng HỢP ĐỒNG/CÔNG VĂN/QUYẾT ĐỊNH/VĂN BẢN/TỜ TRÌNH/BIÊN BẢN/BÁO CÁO/THÔNG BÁO/ĐỀ NGHỊ.
+""".strip()
 
 CONTRACT_EXTRACTION_GUIDANCE = """
 Luật bóc tách hợp đồng:
-- Chỉ trích xuất thông tin có căn cứ trong tài liệu, không tự suy diễn hoặc tự tạo dữ liệu.
-- Ưu tiên trang bìa, phần căn cứ, thành phần ký hợp đồng, điều khoản giá hợp đồng, thời gian thực hiện, thanh toán và bảo lãnh.
-- Nếu cùng một thông tin xuất hiện nhiều lần nhưng khác nhau, ưu tiên điều khoản chính trong hợp đồng, sau đó trang ký kết/thông tin hợp đồng, phụ lục, cuối cùng là văn bản dẫn chiếu.
-- signed_date (ngày ký hợp đồng): BẮT BUỘC lấy NGÀY CÓ ĐỊA ĐIỂM Ở ĐẦU HOẶC CUỐI HỢP ĐỒNG. PHẢI tìm dạng "Hà Nội, ngày 16 tháng 12 năm 2021", "..., hôm nay ngày...". PHẢI có địa điểm + dấu phẩy + ngày tháng năm. TUYỆT ĐỐI KHÔNG lấy ngày từ văn bản pháp lý như "Căn cứ Luật...", "Nghị định...". Output BẮT BUỘC: value="DD/MM/YYYY", normalized_value="YYYY-MM-DD".
-- Tất cả các field ngày (signed_date, performance_guarantee_end_date, advance_guarantee_end_date): value = "DD/MM/YYYY", normalized_value = "YYYY-MM-DD". Không trả nguyên văn "ngày XX tháng YY năm ZZZZ".
-- Giá trị tiền chuẩn hóa về số VND, không kèm chữ đồng.
-- Tỷ lệ phần trăm chuẩn hóa về số, ví dụ 10 thay vì 10%.
-- Tên công việc là field mapping: hiểu bản chất công việc rồi đề xuất task/subtask/subsubtask phù hợp, không lấy nguyên văn máy móc nếu tiêu đề quá dài.
-- Hình thức hợp đồng, nhóm nhà thầu, tên nhà thầu là danh mục/mapping động; đề xuất giá trị phù hợp nhất và confidence, không hard-code ngoài danh mục được truyền vào.
-- Giá trị dự toán không bắt buộc; chỉ lấy nếu có cụm như giá gói thầu, dự toán được duyệt, tổng mức dự toán, giá trị dự toán.
-- Giá trị hợp đồng lấy từ điều khoản Giá hợp đồng/Giá trị hợp đồng. Nếu chỉ có một nhà thầu, tiền hợp đồng của nhà thầu bằng giá trị hợp đồng.
-- Không tự tính bảo lãnh từ tỷ lệ phần trăm nếu tài liệu không nêu số tiền/ngày cụ thể.
+- không tự suy diễn; ưu tiên điều khoản chính, trang ký/thông tin hợp đồng, rồi phụ lục/văn bản dẫn chiếu.
+- signed_date: ưu tiên dòng "<Địa danh>, ngày DD tháng MM năm YYYY" dưới tiêu ngữ "Độc lập - Tự do - Hạnh phúc", hoặc "hôm nay, ngày ... tháng ... năm ..." ở đầu/cuối hợp đồng; value=DD/MM/YYYY, normalized_value=YYYY-MM-DD. KHÔNG lấy ngày trong Căn cứ/Luật/Nghị định/Thông tư/Quyết định số/Công văn số.
+- Tiền chuẩn hóa về số VND; phần trăm về số. contract_value từ Giá/Giá trị hợp đồng; estimated_value khi có giá gói thầu/dự toán/tổng mức; không tự tính bảo lãnh.
+- Tên công việc là field mapping: hiểu bản chất để đề xuất task/subtask/subsubtask, không lấy nguyên văn nếu quá dài.
+- contract_form và contractor_group chọn từ danh mục tham chiếu nếu phù hợp.
 """.strip()
+
+CONTRACT_FIELD_RULES = CONTRACT_EXTRACTION_GUIDANCE
+
+FIELD_OBJECT_HINT = 'Field object={"value":string|null,"normalized_value":any|null,"evidence":string|null,"confidence":0-1}'
+DOCUMENT_SCHEMA_HINT = (
+    'Schema={"document_type":"document","document_intent":"to_trinh|quyet_dinh|bien_ban|cong_van|bao_cao|unknown",'
+    '"fields":{document_number,signed_or_effective_date,approved_value,submitted_value,issuer,notes,title},'
+    '"generic_extraction":{document_title_or_type,project_name_candidates,task_title_candidates,work_item_candidates,procurement_package_candidates,task_keywords,dates,monetary_amounts,document_numbers,approvers_or_positions},'
+    '"entities":{projects,tasks,work_items,procurement_packages,business_actions,monetary_entities,organizations,people,locations},"notes":[]}'
+)
+CONTRACT_SCHEMA_HINT = (
+    'Schema={"document_type":"contract","document_intent":"contract",'
+    '"fields":{work_name,contract_name,contract_number,signed_date,execution_duration_days,contract_form,contract_vat_percent,settlement_request_vat_percent,appraisal_vat_percent,estimated_value,contract_value,contractor_group,contractor_name,contractor_contract_amount,performance_guarantee_value,performance_guarantee_end_date,advance_guarantee_value,advance_guarantee_end_date},'
+    '"generic_extraction":{document_title_or_type,task_title_candidates,work_item_candidates,contract_parties,monetary_amounts,dates,document_numbers,guarantee_terms},'
+    '"entities":{tasks,work_items,contract_parties,contractors,guarantees,monetary_entities,organizations,people,dates},"notes":[]}'
+)
 
 
 def empty_field(label: str) -> dict[str, Any]:
@@ -111,12 +152,26 @@ def empty_field(label: str) -> dict[str, Any]:
     }
 
 
-def normalize_result(payload: dict[str, Any], text: str, payload_source: str = "llm") -> dict[str, Any]:
+def normalize_extraction_type(value: Optional[str] = None) -> str:
+    extraction_type = (value or DEFAULT_EXTRACTION_TYPE).strip().lower()
+    if extraction_type not in EXTRACTION_TYPES:
+        raise ValueError("extraction_type must be either 'document' or 'contract'")
+    return extraction_type
+
+
+def normalize_result(
+    payload: dict[str, Any],
+    text: str,
+    payload_source: str = "llm",
+    extraction_type: Optional[str] = DEFAULT_EXTRACTION_TYPE,
+) -> dict[str, Any]:
     text = clean_ocr_text(text)
-    detected_type = payload.get("document_type")
-    if detected_type not in {"contract", "document"}:
-        detected_type = classify_document(text)
+    detected_type = normalize_extraction_type(extraction_type)
     detected_intent = payload.get("document_intent") or classify_document_intent(text)
+    if detected_type == "contract":
+        detected_intent = "contract"
+    elif detected_intent == "contract":
+        detected_intent = "unknown"
 
     field_schema = CONTRACT_FIELDS if detected_type == "contract" else DOCUMENT_FIELDS
     fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
@@ -166,7 +221,6 @@ def normalize_result(payload: dict[str, Any], text: str, payload_source: str = "
     heuristic_generic = heuristic_generic_extraction(text)
     non_empty_generic = {key: value for key, value in generic.items() if value not in (None, "", [])}
     non_empty_entities = {key: value for key, value in payload_entities.items() if value not in (None, "", [])}
-
     result = {
         "document_type": detected_type,
         "document_type_label": "Hợp đồng" if detected_type == "contract" else "Tài liệu",
@@ -296,7 +350,11 @@ def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], lis
             confidence=confidence,
         )
 
-    approved_value = extract_labeled_money(text, MONEY_LABELS_APPROVED)
+    approved_value = extract_labeled_money(
+        text,
+        MONEY_LABELS_APPROVED,
+        exclude_context_keywords=APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS,
+    )
     if approved_value:
         value, normalized_value, evidence, confidence = approved_value
         fields["approved_value"] = build_field(
@@ -606,6 +664,12 @@ def normalize_candidate_field(key: str, field: dict[str, Any]) -> dict[str, Any]
         if duration:
             field["normalized_value"] = int(duration.group(1))
 
+    if key in {"document_number", "contract_number"}:
+        normalized_document_number = normalize_document_number(source_value)
+        if normalized_document_number:
+            field["value"] = normalized_document_number
+            field["normalized_value"] = normalized_document_number
+
     if key in {"signed_or_effective_date", "signed_date", "performance_guarantee_end_date", "advance_guarantee_end_date"}:
         # Prefer the raw value (likely Vietnamese phrasing) over a pre-normalized ISO string,
         # because extract_first_date matches dd-mm-yy and would mis-parse "2021-12-16" as 21/12/2016.
@@ -674,18 +738,142 @@ def extract_document_number(text: str) -> Optional[tuple[str, str]]:
         value = re.split(r"\s+(?:ngày|ngay)\s+", value, maxsplit=1, flags=re.IGNORECASE)[0]
         value = value.strip(" .,:;-")
         if re.search(r"\d", value):
-            return value, line
+            return normalize_document_number(value) or value, line
     return None
 
 
+def normalize_document_number(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+
+    raw = clean_text(str(value))
+    # Normalize common OCR artefacts in numbering (fullwidth/ellipsis/middle dot)
+    # so "981．．．/TTr-...", "981…/TTr-..." behave like "981.../TTr-...".
+    raw = raw.translate(str.maketrans({"．": ".", "·": ".", "•": ".", "…": "..."}))
+    raw = re.sub(r"^(?:số|so)\s*[:.]?\s*", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.split(r"\s+(?:ngày|ngay)\s+", raw, maxsplit=1, flags=re.IGNORECASE)[0]
+    raw = raw.strip(" .,:;-")
+    if not raw or not re.search(r"\d", raw):
+        return None
+
+    raw = re.sub(r"\s*/\s*", "/", raw)
+    raw = re.sub(r"\s*-\s*", "-", raw)
+    raw = re.sub(r"\s+", "", raw)
+    raw = re.sub(r"\.+(?=/)", "", raw)
+
+    if "/" in raw:
+        prefix, suffix = raw.split("/", 1)
+        normalized_prefix = normalize_document_number_prefix(prefix)
+        suffix = suffix.strip(" .,:;-")
+        if normalized_prefix and suffix:
+            return f"{normalized_prefix}/{suffix}"
+        if normalized_prefix:
+            return normalized_prefix
+
+    return raw.strip(" .,:;-")
+
+
+def normalize_document_number_prefix(prefix: str) -> str:
+    prefix = prefix.strip(" .,:;-")
+    if not prefix:
+        return ""
+    # Normalize OCR artefacts: fullwidth dot "．", ellipsis "…", middle dot "·",
+    # non-breaking / zero-width whitespace — so "981．．．", "981…", "9 8 1" all
+    # collapse to "981" before the digits-only check below.
+    prefix = prefix.translate(str.maketrans({
+        "．": ".",
+        "·": ".",
+        "•": ".",
+        "…": ".",
+        " ": " ",
+        "​": "",
+        " ": " ",
+    }))
+    if re.fullmatch(r"[\d.\s]+", prefix):
+        digits = re.sub(r"\D", "", prefix)
+        return digits or prefix
+    return re.sub(r"\s+", "", prefix)
+
+
+def apply_filename_document_number_hint(extraction_data: dict[str, Any], filename: Optional[str]) -> dict[str, Any]:
+    filename_prefix = extract_filename_document_number_prefix(filename)
+    if not filename_prefix:
+        return extraction_data
+
+    fields = extraction_data.get("fields") if isinstance(extraction_data.get("fields"), dict) else {}
+    field = fields.get("document_number") if isinstance(fields.get("document_number"), dict) else None
+    if not field:
+        return extraction_data
+
+    current = normalize_document_number(field.get("normalized_value") or field.get("value"))
+    if not current or "/" not in current:
+        return extraction_data
+
+    current_prefix, suffix = current.split("/", 1)
+    if should_use_filename_document_number_prefix(current_prefix, filename_prefix):
+        corrected = f"{filename_prefix}/{suffix}"
+        field["value"] = corrected
+        field["normalized_value"] = corrected
+        field["source"] = field.get("source") or "rule"
+        notes = extraction_data.setdefault("notes", [])
+        if isinstance(notes, list):
+            notes.append(f"Số văn bản được hiệu chỉnh theo tên file: {corrected}")
+
+    return extraction_data
+
+
+def extract_filename_document_number_prefix(filename: Optional[str]) -> Optional[str]:
+    if not filename:
+        return None
+    stem = Path(filename).stem
+    match = re.match(r"^\s*(\d{2,8})(?=[.\s_-])", stem)
+    return match.group(1) if match else None
+
+
+def should_use_filename_document_number_prefix(current_prefix: str, filename_prefix: str) -> bool:
+    current_digits = re.sub(r"\D", "", current_prefix)
+    filename_digits = re.sub(r"\D", "", filename_prefix)
+    if not current_digits or not filename_digits or current_digits == filename_digits:
+        return False
+    if abs(len(filename_digits) - len(current_digits)) > 2:
+        return False
+    similarity = difflib.SequenceMatcher(None, current_digits, filename_digits).ratio()
+    return similarity >= 0.75
+
+
 def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str, float]]:
-    # Priority 1: Date at document header (e.g., "Hà Nội, ngày 16 tháng 12 năm 2021")
-    # This pattern is most reliable for official documents
-    header_text = text[:1500]  # Search in first 1500 chars where document header usually is
-    header_pattern = r"(?:[\w\s.]+,\s*)?ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})\s+năm\s+(\d{4})"
-    header_match = re.search(header_pattern, header_text, flags=re.IGNORECASE)
-    if header_match:
-        day, month, year = header_match.groups()
+    # Priority 1: Date under the national motto ("Độc lập - Tự do - Hạnh phúc")
+    # in the form "<địa danh>, ngày DD tháng MM năm YYYY". The location prefix
+    # with a comma is REQUIRED to avoid matching legal references like
+    # "Luật số 43/2013/QH13 ngày 26 tháng 11 năm 2013".
+    LEGAL_CONTEXT_KEYWORDS = (
+        "luật", "nghị định", "nghị quyết", "thông tư",
+        "quyết định số", "căn cứ", "công văn số",
+    )
+
+    # Vietnamese place-name prefix: Title-cased words (e.g. "Hà Nội", "TP. Hồ Chí Minh"),
+    # 1-6 tokens, ending with a comma immediately before "ngày".
+    location_date_pattern = re.compile(
+        r"([A-ZĐÀ-Ỹ][\wÀ-ỹ.]*(?:\s+[A-ZĐÀ-Ỹ\d][\wÀ-ỹ.]*){0,5})\s*,\s*"
+        r"ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})\s+năm\s+(\d{4})",
+        flags=re.IGNORECASE,
+    )
+
+    # Prefer scanning right after the national motto when present.
+    motto_match = re.search(
+        r"độc\s*lập\s*[-–—]\s*tự\s*do\s*[-–—]\s*hạnh\s*phúc",
+        text,
+        flags=re.IGNORECASE,
+    )
+    search_start = motto_match.end() if motto_match else 0
+    header_text = text[search_start : search_start + 1500]
+
+    for header_match in location_date_pattern.finditer(header_text):
+        context_start = max(0, header_match.start() - 120)
+        context = header_text[context_start : header_match.end()].lower()
+        if any(keyword in context for keyword in LEGAL_CONTEXT_KEYWORDS):
+            continue
+        _location, day, month, year = header_match.groups()
         normalized = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
         display = f"{int(day):02d}/{int(month):02d}/{int(year):04d}"
         evidence = clean_text(header_match.group(0))
@@ -713,7 +901,7 @@ def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str,
             normalized = normalize_date(date)
             display = format_display_date(normalized) if normalized else None
             return display or date, normalized or date, clean_text(match.group(0)), 0.86
-        return raw, raw, clean_text(match.group(0)), 0.72
+        continue
 
     # Priority 3: Date in meaningful lines (fallback)
     for line in meaningful_lines(text, limit=80):
@@ -753,6 +941,16 @@ MONEY_LABELS_APPROVED = [
     "dự toán phê duyệt",
     "tổng mức đầu tư được phê duyệt",
     "tổng mức đầu tư phê duyệt",
+    "tổng mức đầu tư",
+    "tổng mức đầu tư dự kiến",
+    "tổng mức đầu tư xây dựng",
+    "tổng mức dự toán",
+    "tổng mức được duyệt",
+    "tổng mức duyệt",
+    "tổng kinh phí được duyệt",
+    "tổng kinh phí",
+    "kinh phí thực hiện",
+    "nguồn vốn đầu tư",
 ]
 
 MONEY_LABELS_SUBMITTED = [
@@ -771,6 +969,26 @@ MONEY_LABELS_SUBMITTED = [
     "kinh phí đề nghị",
     "giá trị đề nghị phê duyệt",
 ]
+
+APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS = [
+    "de nghi",
+    "xin phe duyet",
+    "trinh duyet",
+    "trinh phe duyet",
+]
+
+TOTAL_INVESTMENT_LABELS = {
+    "tong muc dau tu",
+    "tong muc dau tu du kien",
+    "tong muc dau tu xay dung",
+    "tong muc du toan",
+    "tong muc duoc duyet",
+    "tong muc duyet",
+    "tong kinh phi duoc duyet",
+    "tong kinh phi",
+    "kinh phi thuc hien",
+    "nguon von dau tu",
+}
 
 CONTRACT_ESTIMATED_VALUE_LABELS = [
     "giá gói thầu",
@@ -1014,13 +1232,18 @@ def infer_contractor_group(text: str, contract_name: str) -> Optional[tuple[str,
     return None
 
 
-def extract_labeled_money(text: str, labels: list[str]) -> Optional[tuple[str, Any, str, float]]:
+def extract_labeled_money(
+    text: str,
+    labels: list[str],
+    exclude_context_keywords: Optional[list[str]] = None,
+) -> Optional[tuple[str, Any, str, float]]:
     normalized_text = normalize_for_rules(text)
     best: Optional[tuple[str, Any, str, float]] = None
-    best_index = len(text) + 1
+    best_rank: Optional[tuple[int, int, int]] = None
 
     for label in labels:
         normalized_label = normalize_for_rules(label)
+        prefer_largest_money = normalized_label in TOTAL_INVESTMENT_LABELS
         start = 0
         while True:
             idx = normalized_text.find(normalized_label, start)
@@ -1028,14 +1251,24 @@ def extract_labeled_money(text: str, labels: list[str]) -> Optional[tuple[str, A
                 break
             raw_idx = approximate_raw_index(text, normalized_text, idx)
             window = text[raw_idx : raw_idx + 320]
-            money = find_first_money(window)
+            if should_skip_money_context(window, exclude_context_keywords):
+                start = idx + len(normalized_label)
+                continue
+            money = find_largest_money_with_offset(window) if prefer_largest_money else find_first_money(window)
             if money:
-                value, normalized_value = money
-                evidence = first_meaningful_line(window)
+                if prefer_largest_money:
+                    value, normalized_value, offset = money
+                    evidence_window = window[max(0, offset - 220) : offset + len(value)]
+                    evidence_lines = meaningful_lines(evidence_window)
+                    evidence = clean_text(" ".join(evidence_lines[-4:])) if evidence_lines else first_meaningful_line(evidence_window)
+                else:
+                    value, normalized_value = money
+                    evidence = first_meaningful_line(window)
                 candidate = (value, normalized_value, evidence, 0.84)
-                if idx < best_index:
+                rank = money_candidate_rank(idx, normalized_value, prefer_largest_money)
+                if best_rank is None or rank > best_rank:
                     best = candidate
-                    best_index = idx
+                    best_rank = rank
             start = idx + len(normalized_label)
 
     if best:
@@ -1044,11 +1277,28 @@ def extract_labeled_money(text: str, labels: list[str]) -> Optional[tuple[str, A
     for line in meaningful_lines(text, limit=200):
         normalized_line = normalize_for_rules(line)
         if any(normalize_for_rules(label) in normalized_line for label in labels):
+            if should_skip_money_context(line, exclude_context_keywords):
+                continue
             money = find_first_money(line)
             if money:
                 value, normalized_value = money
                 return value, normalized_value, line, 0.78
     return None
+
+
+def money_candidate_rank(idx: int, normalized_value: Any, prefer_largest_money: bool) -> tuple[int, int, int]:
+    if prefer_largest_money and isinstance(normalized_value, int):
+        return 1, normalized_value, -idx
+    return 0, -idx, 0
+
+
+def should_skip_money_context(text: str, exclude_context_keywords: Optional[list[str]]) -> bool:
+    if not exclude_context_keywords:
+        return False
+    money_match = MONEY_PATTERN.search(text[:180])
+    context = text[: money_match.start()] if money_match else text[:140]
+    normalized = normalize_for_rules(context)
+    return any(keyword in normalized for keyword in exclude_context_keywords)
 
 
 PERCENT_PATTERN = re.compile(r"(?<!\d)(\d{1,2}(?:[,.]\d+)?)\s*%", flags=re.IGNORECASE)
@@ -1327,6 +1577,35 @@ def find_first_money(text: str) -> Optional[tuple[str, Any]]:
     return None
 
 
+def find_largest_money(text: str) -> Optional[tuple[str, Any]]:
+    money = find_largest_money_with_offset(text)
+    if not money:
+        return None
+    value, normalized, _offset = money
+    return value, normalized
+
+
+def find_largest_money_with_offset(text: str) -> Optional[tuple[str, Any, int]]:
+    best: Optional[tuple[str, Any]] = None
+    best_value = -1
+    best_offset = 0
+    for match in MONEY_PATTERN.finditer(text):
+        value = clean_text(match.group(0))
+        if not re.search(r"\d", value):
+            continue
+        if looks_like_non_money_number(text, match, value):
+            continue
+        normalized = normalize_money(value)
+        if isinstance(normalized, int) and normalized > best_value:
+            best = (value, normalized)
+            best_value = normalized
+            best_offset = match.start()
+    if not best:
+        return None
+    value, normalized = best
+    return value, normalized, best_offset
+
+
 def looks_like_non_money_number(text: str, match: re.Match, value: str) -> bool:
     tail = text[match.end() : match.end() + 2]
     if "%" in tail:
@@ -1336,8 +1615,10 @@ def looks_like_non_money_number(text: str, match: re.Match, value: str) -> bool:
     has_money_unit = any(unit in normalized for unit in ("dong", "vnd", "vnđ", "ty", "trieu"))
     has_thousand_separator = bool(re.search(r"\d{1,3}(?:[.\s]\d{3})+", value))
     digit_count = len(re.sub(r"\D", "", value))
-    if has_money_unit or has_thousand_separator or digit_count >= 7:
+    if has_money_unit or digit_count >= 7:
         return False
+    if has_thousand_separator and digit_count < 7:
+        return True
 
     return True
 
@@ -1460,27 +1741,7 @@ def approximate_raw_index(raw_text: str, normalized_text: str, normalized_index:
 
 
 def clean_ocr_text(text: str) -> str:
-    text = unicodedata.normalize("NFKC", text or "")
-    replacements = {
-        "\ufeff": "",
-        "\u200b": "",
-        "\u00a0": " ",
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "–": "-",
-        "—": "-",
-    }
-    for source, target in replacements.items():
-        text = text.replace(source, target)
-
-    cleaned_lines = []
-    for line in text.splitlines():
-        line = re.sub(r"[ \t]+", " ", line).strip()
-        if line:
-            cleaned_lines.append(line)
-    return "\n".join(cleaned_lines)
+    return clean_ocr_plain_text(text)
 
 
 def non_boilerplate_lines(text: str, limit: int = 80) -> list[str]:
@@ -1543,8 +1804,12 @@ def unique_matches(pattern: str, text: str, limit: int, flags: int = 0) -> list[
     return seen
 
 
-async def extract_information(text: str) -> dict[str, Any]:
+async def extract_information(
+    text: str,
+    extraction_type: Optional[str] = DEFAULT_EXTRACTION_TYPE,
+) -> dict[str, Any]:
     text = clean_ocr_text(text)
+    extraction_type = normalize_extraction_type(extraction_type)
     llm_config = get_llm_config()
     local_enabled = env_bool("LOCAL_EXTRACTION_ENABLED", True)
     entity_extraction_enabled = env_bool("LLM_ENTITY_EXTRACTION_ENABLED", True)
@@ -1554,19 +1819,19 @@ async def extract_information(text: str) -> dict[str, Any]:
         # Optionally run local parser for entity extraction prompt or validation
         local_data = None
         if local_enabled and entity_extraction_enabled:
-            local_data = normalize_result({}, text, payload_source="rule")
+            local_data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
 
         # Build prompt (with or without local context)
         if entity_extraction_enabled and local_data:
             prompt = build_entity_extraction_prompt(text, local_data)
             llm_mode = "entity_extraction"
         else:
-            prompt = build_prompt(text)
+            prompt = build_prompt(text, extraction_type=extraction_type)
             llm_mode = "direct"
 
         try:
             parsed = await call_llm_extraction(llm_config, prompt)
-            data = normalize_result(parsed, text, payload_source="llm")
+            data = normalize_result(parsed, text, payload_source="llm", extraction_type=extraction_type)
             data["pipeline"] = "local_with_llm_fallback" if llm_mode == "entity_extraction" else "llm"
             data["llm_extraction_mode"] = llm_mode
             data["llm_fallback_used"] = True
@@ -1583,7 +1848,7 @@ async def extract_information(text: str) -> dict[str, Any]:
             # LLM failed, fallback to local if enabled
             if local_enabled:
                 if local_data is None:
-                    local_data = normalize_result({}, text, payload_source="rule")
+                    local_data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
                 local_data["pipeline"] = "local"
                 local_data["llm_fallback_error"] = compact_error(exc)
                 local_data["needs_review"] = True
@@ -1594,7 +1859,7 @@ async def extract_information(text: str) -> dict[str, Any]:
                 }
             else:
                 # No local fallback, return error
-                data = normalize_result({}, text, payload_source="rule")
+                data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
                 data["pipeline"] = "llm_failed_no_fallback"
                 data["llm_error"] = compact_error(exc)
                 data["needs_review"] = True
@@ -1606,7 +1871,7 @@ async def extract_information(text: str) -> dict[str, Any]:
 
     # Priority 2: No LLM available, use local parser
     if local_enabled:
-        data = normalize_result({}, text, payload_source="rule")
+        data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
         data["pipeline"] = "local"
         return {
             "provider": "local",
@@ -1615,7 +1880,7 @@ async def extract_information(text: str) -> dict[str, Any]:
         }
 
     # No LLM and no local enabled - return empty
-    data = normalize_result({}, text, payload_source="rule")
+    data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
     data["pipeline"] = "no_extraction_available"
     data["needs_review"] = True
     return {
@@ -1856,92 +2121,45 @@ def should_use_llm_fallback(data: dict[str, Any]) -> bool:
     return safe_float(data.get("local_confidence")) < env_float("LOCAL_CONFIDENCE_THRESHOLD", 0.68)
 
 
+def compact_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def compact_prompt_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, field in fields.items():
+        if not isinstance(field, dict):
+            continue
+        value = field.get("value")
+        normalized_value = field.get("normalized_value")
+        evidence = field.get("evidence")
+        confidence = safe_float(field.get("confidence"))
+        if value in (None, "") and normalized_value in (None, "") and evidence in (None, "") and confidence <= 0:
+            continue
+        compact[key] = {
+            "v": value,
+            "n": normalized_value,
+            "e": evidence,
+            "c": field.get("confidence"),
+        }
+    return compact
+
+
 def build_entity_extraction_prompt(text: str, local_data: dict[str, Any]) -> str:
     fields = local_data.get("fields") if isinstance(local_data.get("fields"), dict) else {}
-    compact_fields = {
-        key: {
-            "value": field.get("value"),
-            "normalized_value": field.get("normalized_value"),
-            "evidence": field.get("evidence"),
-            "confidence": field.get("confidence"),
-            "source": field.get("source"),
-        }
-        for key, field in fields.items()
-        if isinstance(field, dict)
-    }
+    compact_fields = compact_prompt_fields(fields)
     if local_data.get("screen") == "contract":
         return build_contract_entity_extraction_prompt(text, local_data, compact_fields)
 
     trimmed_text = select_entity_extraction_text(text)
     return f"""
-Bạn hãy đọc OCR tiếng Việt và trích xuất intent/entities nghiệp vụ càng đầy đủ càng tốt.
-Local rule bên dưới chỉ là gợi ý, được phép sửa nếu OCR chứng minh rõ hơn. Không suy đoán khi không có chứng cứ.
-Chỉ trả JSON hợp lệ, không markdown.
-
-Local rule result:
-{json.dumps(compact_fields, ensure_ascii=False, indent=2)}
-
-Quy tắc field quan trọng:
-- document_number: số văn bản/số tờ trình/số quyết định ở đầu tài liệu.
-- signed_or_effective_date: BẮT BUỘC lấy NGÀY CÓ ĐỊA ĐIỂM Ở ĐẦU VÀN BẢN (thường trong 500 ký tự đầu tiên).
-  * PHẢI tìm dạng: "Hà Nội, ngày 16 tháng 12 năm 2021", "TP. Hồ Chí Minh, ngày 25 tháng 3 năm 2022", "Đà Nẵng, ngày..."
-  * PHẢI có địa điểm (tên thành phố/tỉnh) + dấu phẩy + "ngày XX tháng YY năm ZZZZ"
-  * TUYỆT ĐỐI KHÔNG lấy ngày từ: "Căn cứ Luật...", "Nghị định số...", "Thông tư số...", "Quyết định số... ngày..."
-  * Chỉ khi KHÔNG tìm thấy ngày có địa điểm ở đầu văn bản, mới lấy "ngày ký:", "ngày ban hành:", "thời gian ký:"
-  * Output BẮT BUỘC: value = "DD/MM/YYYY" (ví dụ "16/12/2021"), normalized_value = "YYYY-MM-DD" (ví dụ "2021-12-16"). Không trả nguyên văn "ngày 16 tháng 12 năm 2021".
-- approved_value: giá trị duyệt/phê duyệt/được duyệt/sau thẩm định. Với tờ trình, "giá gói thầu", "giá trị gói thầu", "giá dự toán gói thầu" thường chính là giá trị duyệt.
-- submitted_value: giá trị trình/đề nghị/xin phê duyệt/trình duyệt/trước thẩm định.
-- issuer: đơn vị phát hành/đơn vị thầu ở góc trái đầu tài liệu, không lấy "Kính gửi".
-- title: BẮT BUỘC trả về. Là tên/tựa đầy đủ của tài liệu, gồm loại văn bản (HỢP ĐỒNG / CÔNG VĂN / QUYẾT ĐỊNH / VĂN BẢN / TỜ TRÌNH / BIÊN BẢN / BÁO CÁO / THÔNG BÁO / ĐỀ NGHỊ) và dòng "Về việc..." nếu có. Title phải bắt đầu bằng một trong các loại văn bản trên và dài hơn 4 từ. Nếu OCR không có dòng nào thoả, để value=null.
-
-Ngoài fields, hãy trả nhiều entity để matcher local dùng ở bước sau:
-- project_name_candidates: tên dự án/công trình đầy đủ và biến thể ngắn.
-- task_title_candidates: các cụm tên công việc con có thể match task.
-- work_item_candidates: hạng mục, nội dung công việc, gói thầu, hồ sơ.
-- procurement_package_candidates: tên/số gói thầu.
-- task_keywords: cụm nghiệp vụ như phê duyệt chủ trương, thẩm định thiết kế, phê duyệt kế hoạch lựa chọn nhà thầu, chỉ định thầu, nghiệm thu, quyết toán.
-- monetary_entities: tất cả dòng tiền quan trọng kèm role nếu nhận ra: approved_value, submitted_value, package_price, estimate, contract_value, unknown.
-
-JSON output schema:
-{{
-  "document_type": "contract|document",
-  "document_intent": "to_trinh|quyet_dinh|bien_ban|cong_van|contract|bao_cao|unknown",
-  "fields": {{
-    "document_number": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "signed_or_effective_date": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "approved_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "submitted_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "issuer": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "notes": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "title": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}}
-  }},
-  "generic_extraction": {{
-    "document_title_or_type": null,
-    "project_name_candidates": [],
-    "task_title_candidates": [],
-    "work_item_candidates": [],
-    "procurement_package_candidates": [],
-    "task_keywords": [],
-    "dates": [],
-    "monetary_amounts": [],
-    "document_numbers": [],
-    "approvers_or_positions": []
-  }},
-  "entities": {{
-    "projects": [],
-    "tasks": [],
-    "work_items": [],
-    "procurement_packages": [],
-    "business_actions": [],
-    "monetary_entities": [],
-    "organizations": [],
-    "people": [],
-    "locations": []
-  }},
-  "notes": []
-}}
-
-OCR text đã clean:
+Trích xuất document từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
+Local fields gợi ý: {compact_json(compact_fields)}
+{DOCUMENT_FIELD_RULES}
+{FIELD_OBJECT_HINT}
+{DOCUMENT_SCHEMA_HINT}
+Entity hints: project_name_candidates, task_title_candidates, work_item_candidates, procurement_package_candidates, task_keywords, monetary_entities.
+OCR:
 \"\"\"{trimmed_text}\"\"\"
 """.strip()
 
@@ -1949,90 +2167,44 @@ OCR text đã clean:
 def build_contract_entity_extraction_prompt(text: str, local_data: dict[str, Any], compact_fields: dict[str, Any]) -> str:
     trimmed_text = select_entity_extraction_text(text)
     return f"""
-Bạn hãy đọc OCR hợp đồng tiếng Việt và trích xuất đầy đủ các field để fill form thêm hợp đồng.
-Local rule bên dưới chỉ là gợi ý/guardrail, được phép sửa nếu OCR chứng minh rõ hơn. Không suy đoán khi không có chứng cứ.
-Chỉ trả JSON hợp lệ, không markdown.
-
-{CONTRACT_EXTRACTION_GUIDANCE}
-
-Danh mục hình thức hợp đồng tham chiếu:
-{json.dumps(CONTRACT_FORMS, ensure_ascii=False)}
-
-Danh mục nhóm nhà thầu tham chiếu:
-{json.dumps(CONTRACTOR_GROUPS, ensure_ascii=False)}
-
-Local rule result:
-{json.dumps(compact_fields, ensure_ascii=False, indent=2)}
-
-JSON output schema:
-{{
-  "document_type": "contract",
-  "document_intent": "contract",
-  "fields": {{
-    "work_name": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contract_name": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contract_number": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "signed_date": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "execution_duration_days": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contract_form": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contract_vat_percent": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "settlement_request_vat_percent": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "appraisal_vat_percent": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "estimated_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contract_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contractor_group": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contractor_name": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "contractor_contract_amount": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "performance_guarantee_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "performance_guarantee_end_date": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "advance_guarantee_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "advance_guarantee_end_date": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}}
-  }},
-  "generic_extraction": {{
-    "document_title_or_type": null,
-    "task_title_candidates": [],
-    "work_item_candidates": [],
-    "contract_parties": [],
-    "monetary_amounts": [],
-    "dates": [],
-    "document_numbers": [],
-    "guarantee_terms": []
-  }},
-  "entities": {{
-    "tasks": [],
-    "work_items": [],
-    "contract_parties": [],
-    "contractors": [],
-    "guarantees": [],
-    "monetary_entities": [],
-    "organizations": [],
-    "people": [],
-    "dates": []
-  }},
-  "notes": []
-}}
-
-OCR text đã clean:
+Trích xuất hợp đồng từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
+{CONTRACT_FIELD_RULES}
+contract_forms={compact_json(CONTRACT_FORMS)}
+contractor_groups={compact_json(CONTRACTOR_GROUPS)}
+Local fields gợi ý: {compact_json(compact_fields)}
+{FIELD_OBJECT_HINT}
+{CONTRACT_SCHEMA_HINT}
+OCR:
 \"\"\"{trimmed_text}\"\"\"
 """.strip()
 
 
 def select_entity_extraction_text(text: str) -> str:
-    max_chars = int(os.getenv("LLM_ENTITY_MAX_CHARS", os.getenv("LLM_MAX_OCR_CHARS", "30000")))
+    max_chars = int(os.getenv("LLM_ENTITY_MAX_CHARS", os.getenv("LLM_MAX_OCR_CHARS", "18000")))
     lines = non_boilerplate_lines(text, limit=900)
     if not lines:
         return text[:max_chars]
 
-    selected = lines[: min(100, len(lines))]
+    head_line_count = min(70, len(lines))
+    selected = lines[:head_line_count]
     keywords = (
         "gia tri",
         "gia goi thau",
+        "gia hop dong",
+        "tong gia tri",
         "du toan",
         "tong muc",
+        "tong kinh phi",
         "goi thau",
         "du an",
         "cong trinh",
         "hang muc",
+        "hop dong",
+        "nha thau",
+        "vat",
+        "bao lanh",
+        "bao dam",
+        "tam ung",
         "phe duyet",
         "thanh dinh",
         "tham dinh",
@@ -2043,7 +2215,7 @@ def select_entity_extraction_text(text: str) -> str:
         "ghi chu",
         "luu y",
     )
-    for line in lines[100:]:
+    for line in lines[head_line_count:]:
         normalized = normalize_for_rules(line)
         if any(keyword in normalized for keyword in keywords):
             selected.append(line)
@@ -2055,59 +2227,19 @@ def select_entity_extraction_text(text: str) -> str:
 
 def build_fallback_prompt(text: str, local_data: dict[str, Any]) -> str:
     fields = local_data.get("fields") if isinstance(local_data.get("fields"), dict) else {}
-    compact_fields = {
-        key: {
-            "value": field.get("value"),
-            "normalized_value": field.get("normalized_value"),
-            "evidence": field.get("evidence"),
-            "confidence": field.get("confidence"),
-            "source": field.get("source"),
-        }
-        for key, field in fields.items()
-        if isinstance(field, dict)
-    }
+    compact_fields = compact_prompt_fields(fields)
     if local_data.get("screen") == "contract":
         return build_contract_entity_extraction_prompt(text, local_data, compact_fields)
 
     snippets = select_fallback_snippets(text, local_data)
     return f"""
-Kết quả rule-based dưới đây có thể thiếu field. Hãy chỉ sửa/bổ sung các field còn thiếu hoặc rõ ràng sai.
-Không suy đoán nếu snippet không đủ chứng cứ. Chỉ trả JSON hợp lệ.
-
-Loại hiện tại: {local_data.get("document_type")} / intent: {local_data.get("document_intent")}
-Local confidence: {local_data.get("local_confidence")}
-
-Field hiện tại:
-{json.dumps(compact_fields, ensure_ascii=False, indent=2)}
-
-Chỉ được trả theo schema:
-{{
-  "document_type": "contract|document",
-  "document_intent": "to_trinh|quyet_dinh|bien_ban|cong_van|contract|bao_cao|unknown",
-  "fields": {{
-    "document_number": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "signed_or_effective_date": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "approved_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "submitted_value": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "issuer": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "notes": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}},
-    "title": {{"value": null, "normalized_value": null, "evidence": null, "confidence": 0.0}}
-  }},
-  "generic_extraction": {{
-    "project_name_candidates": [],
-    "task_title_candidates": [],
-    "work_item_candidates": [],
-    "procurement_package_candidates": [],
-    "task_keywords": []
-  }},
-  "entities": {{}},
-  "notes": []
-}}
-
-Lưu ý: approved_value có thể xuất hiện dưới nhãn "giá gói thầu", "giá trị gói thầu" hoặc "giá dự toán gói thầu".
-Lưu ý title: BẮT BUỘC trả về (nếu OCR có dòng phù hợp). Title phải bắt đầu bằng một trong các loại văn bản HỢP ĐỒNG / CÔNG VĂN / QUYẾT ĐỊNH / VĂN BẢN / TỜ TRÌNH / BIÊN BẢN / BÁO CÁO / THÔNG BÁO / ĐỀ NGHỊ, dài hơn 4 từ, và nên kèm dòng "Về việc..." nếu có.
-
-OCR snippets chọn lọc, không phải toàn bộ tài liệu:
+Sửa/bổ sung field còn thiếu/sai từ snippets. {COMMON_EXTRACTION_RULES}
+Loại hiện tại={local_data.get("document_type")}; intent={local_data.get("document_intent")}; confidence={local_data.get("local_confidence")}
+Local fields={compact_json(compact_fields)}
+{DOCUMENT_FIELD_RULES}
+{FIELD_OBJECT_HINT}
+{DOCUMENT_SCHEMA_HINT}
+OCR snippets:
 \"\"\"{snippets}\"\"\"
 """.strip()
 
@@ -2142,66 +2274,29 @@ def select_fallback_snippets(text: str, local_data: dict[str, Any]) -> str:
         if isinstance(field, dict) and field.get("evidence"):
             selected.append(str(field["evidence"]))
 
-    return "\n".join(unique_values(selected))[: int(os.getenv("LLM_FALLBACK_MAX_CHARS", "9000"))]
+    return "\n".join(unique_values(selected))[: int(os.getenv("LLM_FALLBACK_MAX_CHARS", "7000"))]
 
 
-def build_prompt(text: str) -> str:
+def build_prompt(text: str, extraction_type: Optional[str] = DEFAULT_EXTRACTION_TYPE) -> str:
+    extraction_type = normalize_extraction_type(extraction_type)
     trimmed_text = text[: int(os.getenv("LLM_MAX_OCR_CHARS", "60000"))]
+    if extraction_type == "contract":
+        return f"""
+Trích xuất hợp đồng từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
+{CONTRACT_FIELD_RULES}
+contract_forms={compact_json(CONTRACT_FORMS)}
+contractor_groups={compact_json(CONTRACTOR_GROUPS)}
+{FIELD_OBJECT_HINT}
+{CONTRACT_SCHEMA_HINT}
+OCR text:
+\"\"\"{trimmed_text}\"\"\"
+""".strip()
+
     return f"""
-Hãy tự phân loại tài liệu thành đúng một loại:
-- contract: Hợp đồng
-- document: Tài liệu khác như quyết định, biên bản họp, tờ trình, hóa đơn, công văn.
-
-Nếu là document, trích các field keys:
-{json.dumps(DOCUMENT_FIELDS, ensure_ascii=False, indent=2)}
-Trong đó:
-- title BẮT BUỘC trả về (nếu OCR có): là tên/tựa đầy đủ của tài liệu, bắt đầu bằng một trong các loại văn bản HỢP ĐỒNG / CÔNG VĂN / QUYẾT ĐỊNH / VĂN BẢN / TỜ TRÌNH / BIÊN BẢN / BÁO CÁO / THÔNG BÁO / ĐỀ NGHỊ, dài hơn 4 từ, và thường gồm cả dòng "Về việc..." kèm theo. Không lấy các dòng quảng cáo, header.
-- signed_or_effective_date: BẮT BUỘC lấy NGÀY CÓ ĐỊA ĐIỂM Ở ĐẦU VÀN BẢN (thường trong 500 ký tự đầu). PHẢI tìm dạng "Hà Nội, ngày 16 tháng 12 năm 2021", "TP.HCM, ngày...". PHẢI có địa điểm + dấu phẩy + ngày tháng năm. TUYỆT ĐỐI KHÔNG lấy ngày từ "Căn cứ Luật...", "Nghị định...", "Thông tư...". Chỉ khi KHÔNG có ngày ở đầu mới lấy "ngày ký:", "ngày ban hành:". Output BẮT BUỘC: value="DD/MM/YYYY", normalized_value="YYYY-MM-DD".
-- issuer phải lấy theo phần đầu góc trái tài liệu, không lấy cơ quan nhận ở phần "Kính gửi".
-- approved_value là giá trị đã/được phê duyệt, giá trị duyệt hoặc sau thẩm định. Với tờ trình, "giá gói thầu", "giá trị gói thầu", "giá dự toán gói thầu" thường chính là giá trị duyệt.
-- submitted_value là giá trị trình, đề nghị phê duyệt, trình duyệt hoặc trước thẩm định.
-
-Nếu là contract, trích các field keys:
-{json.dumps(CONTRACT_FIELDS, ensure_ascii=False, indent=2)}
-
-{CONTRACT_EXTRACTION_GUIDANCE}
-
-Mỗi field phải có dạng:
-{{"label": "...", "value": "... hoặc null", "normalized_value": "... hoặc null", "evidence": "câu OCR ngắn chứng minh", "confidence": 0.0-1.0, "source": "llm"}}
-
-Luôn trả thêm generic_extraction gồm:
-- document_title_or_type
-- project_name_candidates
-- task_title_candidates
-- work_item_candidates
-- procurement_package_candidates
-- task_keywords
-- dates
-- monetary_amounts
-- document_numbers
-- approvers_or_positions
-
-Luôn trả thêm entities gồm nhiều tín hiệu match nhất có thể:
-- projects
-- tasks
-- work_items
-- procurement_packages
-- business_actions
-- monetary_entities với role: approved_value, submitted_value, package_price, estimate, contract_value, unknown
-- organizations, people, locations
-
-Các hình thức hợp đồng tham chiếu: {", ".join(CONTRACT_FORMS)}
-Các nhóm nhà thầu tham chiếu: {", ".join(CONTRACTOR_GROUPS)}
-
-JSON output schema:
-{{
-  "document_type": "contract|document",
-  "fields": {{}},
-  "generic_extraction": {{}},
-  "entities": {{}},
-  "notes": []
-}}
-
+Trích xuất document từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
+{DOCUMENT_FIELD_RULES}
+{FIELD_OBJECT_HINT}
+{DOCUMENT_SCHEMA_HINT}
 OCR text:
 \"\"\"{trimmed_text}\"\"\"
 """.strip()

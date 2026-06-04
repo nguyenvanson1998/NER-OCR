@@ -1415,7 +1415,13 @@ def get_text_index(cache_key: str, normalized_candidates: list[str]) -> Optional
 
 
 def build_work_detail_output(extraction: dict[str, Any]) -> dict[str, Any]:
-    fields = extraction.get("fields") if isinstance(extraction.get("fields"), dict) else {}
+    fields = (
+        extraction.get("work_detail_fields")
+        if isinstance(extraction.get("work_detail_fields"), dict)
+        else extraction.get("fields")
+        if isinstance(extraction.get("fields"), dict)
+        else {}
+    )
     match_info = extraction.get("work_detail_match") if isinstance(extraction.get("work_detail_match"), dict) else {}
     project = match_info.get("project") if isinstance(match_info.get("project"), dict) else {}
     task = match_info.get("task") if isinstance(match_info.get("task"), dict) else {}

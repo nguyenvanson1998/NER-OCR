@@ -39,6 +39,16 @@
       background: #ffffff;
       font-size: 13px;
     }
+    .type-toggle {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      width: 210px;
+      padding: 4px;
+      border: 1px solid #c9d3df;
+      border-radius: 8px;
+      background: #f4f7fa;
+    }
     button {
       height: 38px;
       padding: 0 14px;
@@ -51,6 +61,19 @@
       white-space: nowrap;
     }
     button:disabled { background: #8ba7c7; cursor: progress; }
+    .type-toggle button {
+      height: 30px;
+      padding: 0 10px;
+      border: 0;
+      background: transparent;
+      color: #405469;
+      font-size: 13px;
+    }
+    .type-toggle button.active {
+      background: #ffffff;
+      color: #0f5fbf;
+      box-shadow: 0 1px 4px rgba(23, 33, 43, 0.12);
+    }
     .status {
       min-width: 180px;
       text-align: right;
@@ -248,6 +271,7 @@
       header { height: auto; align-items: stretch; flex-direction: column; padding: 14px; }
       .toolbar { flex-wrap: wrap; }
       input[type="file"] { width: 100%; }
+      .type-toggle { width: 100%; }
       .status { text-align: left; }
       main { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 64px); }
       .viewer { height: 62vh; border-right: 0; border-bottom: 1px solid #d9e1ea; }
@@ -259,6 +283,10 @@
   <header>
     <h1>NER OCR Layout Demo</h1>
     <form id="uploadForm" class="toolbar">
+      <div class="type-toggle" aria-label="Loại bóc thông tin">
+        <button id="documentTypeBtn" class="active" type="button">Document</button>
+        <button id="contractTypeBtn" type="button">Hợp đồng</button>
+      </div>
       <input id="fileInput" type="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" required />
       <button id="submitBtn" type="submit">OCR</button>
     </form>
@@ -297,6 +325,8 @@
     const form = document.getElementById("uploadForm");
     const fileInput = document.getElementById("fileInput");
     const submitBtn = document.getElementById("submitBtn");
+    const documentTypeBtn = document.getElementById("documentTypeBtn");
+    const contractTypeBtn = document.getElementById("contractTypeBtn");
     const statusEl = document.getElementById("status");
     const viewerEl = document.getElementById("viewer");
     const fieldsEl = document.getElementById("fields");
@@ -307,6 +337,10 @@
     let pageOverlays = new Map();
     let resultData = null;
     let activeKey = null;
+    let extractionType = "document";
+
+    documentTypeBtn.addEventListener("click", () => setExtractionType("document"));
+    contractTypeBtn.addEventListener("click", () => setExtractionType("contract"));
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -321,7 +355,7 @@
         await renderLocalDocument(file);
         const body = new FormData();
         body.append("file", file);
-        const response = await fetch("/api/ocr/extract-layout", { method: "POST", body });
+        const response = await fetch(`/api/ocr/extract-layout?type=${encodeURIComponent(extractionType)}`, { method: "POST", body });
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Không xử lý được tài liệu.");
         resultData = data;
@@ -344,6 +378,12 @@
       docTypeEl.textContent = "-";
       llmInfoEl.textContent = "-";
       boxCountEl.textContent = "-";
+    }
+
+    function setExtractionType(nextType) {
+      extractionType = nextType;
+      documentTypeBtn.classList.toggle("active", extractionType === "document");
+      contractTypeBtn.classList.toggle("active", extractionType === "contract");
     }
 
     async function renderLocalDocument(file) {

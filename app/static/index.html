@@ -126,6 +126,13 @@
       color: var(--accent);
       box-shadow: 0 1px 4px rgba(23, 33, 43, 0.12);
     }
+    .extract-mode {
+      display: grid;
+      gap: 8px;
+    }
+    .extract-mode .mode {
+      margin-bottom: 0;
+    }
     .control-panel {
       display: grid;
       gap: 16px;
@@ -346,6 +353,13 @@
       </div>
 
       <form id="inputForm" class="control-panel">
+        <div class="extract-mode">
+          <label>Loại bóc thông tin</label>
+          <div class="mode" aria-label="Loại bóc thông tin">
+            <button id="documentTypeBtn" class="active" type="button" data-extraction-type="document">Document</button>
+            <button id="contractTypeBtn" type="button" data-extraction-type="contract">Hợp đồng</button>
+          </div>
+        </div>
         <div id="fileInputGroup">
           <label for="fileInput">Tài liệu</label>
           <input id="fileInput" type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.doc,.docx,.html,.htm,.txt" />
@@ -442,6 +456,8 @@
     const form = document.getElementById("inputForm");
     const fileModeBtn = document.getElementById("fileModeBtn");
     const textModeBtn = document.getElementById("textModeBtn");
+    const documentTypeBtn = document.getElementById("documentTypeBtn");
+    const contractTypeBtn = document.getElementById("contractTypeBtn");
     const fileInputGroup = document.getElementById("fileInputGroup");
     const textInputGroup = document.getElementById("textInputGroup");
     const fileInput = document.getElementById("fileInput");
@@ -468,11 +484,14 @@
     const reloadProjectsBtn = document.getElementById("reloadProjectsBtn");
     const projectSelectMeta = document.getElementById("projectSelectMeta");
     let mode = "file";
+    let extractionType = "document";
     let lastData = null;
     let projectOptions = [];
 
     fileModeBtn.addEventListener("click", () => setMode("file"));
     textModeBtn.addEventListener("click", () => setMode("text"));
+    documentTypeBtn.addEventListener("click", () => setExtractionType("document"));
+    contractTypeBtn.addEventListener("click", () => setExtractionType("contract"));
     clearBtn.addEventListener("click", clearAll);
     copyOutputBtn.addEventListener("click", copyOutput);
     reloadProjectsBtn.addEventListener("click", loadProjects);
@@ -537,8 +556,10 @@
           return `<option value="${escapeHtml(project.id)}">${escapeHtml(label)}</option>`;
         })
       ].join("");
-      projectSelect.disabled = false;
-      projectSelectMeta.textContent = `Đã tải ${projectOptions.length} dự án.`;
+      projectSelect.disabled = extractionType === "contract";
+      projectSelectMeta.textContent = extractionType === "contract"
+        ? "Hợp đồng không chạy mapping dự án/công việc."
+        : `Đã tải ${projectOptions.length} dự án.`;
     }
 
     function projectOptionLabel(project) {
@@ -548,6 +569,11 @@
     }
 
     function syncProjectSelection(extraction) {
+      if (extraction.screen === "contract") {
+        projectSelect.value = "";
+        renderSelectedProjectMeta(false);
+        return;
+      }
       if (!projectOptions.length || projectSelect.disabled) return;
       const output = extraction.work_detail_output || {};
       const matchedProject = extraction.work_detail_match?.project || {};
@@ -567,6 +593,10 @@
     }
 
     function renderSelectedProjectMeta(shouldRefreshOutput) {
+      if (extractionType === "contract") {
+        projectSelectMeta.textContent = "Hợp đồng không chạy mapping dự án/công việc.";
+        return;
+      }
       const project = selectedProject();
       if (!project) {
         if (projectOptions.length && !projectSelect.disabled) {
@@ -582,13 +612,18 @@
       ].filter(Boolean).join(" | ");
 
       if (shouldRefreshOutput && lastData?.extraction?.work_detail_output) {
-        workOutput.innerHTML = renderOutputGrid(getEffectiveOutput(lastData));
+        workOutput.innerHTML = renderOutputGrid(lastData);
         rawJson.textContent = JSON.stringify(buildDisplayData(lastData), null, 2);
       }
     }
 
     function getEffectiveOutput(data = lastData) {
-      const output = { ...(data?.extraction?.work_detail_output || {}) };
+      const extraction = data?.extraction || {};
+      if (extraction.screen === "contract") {
+        return contractOutput(extraction.fields || {});
+      }
+
+      const output = { ...(extraction.work_detail_output || {}) };
       const project = selectedProject();
       if (!project) return output;
       output.project_id = project.id;
@@ -599,10 +634,14 @@
     }
 
     function buildDisplayData(data) {
+      const extraction = data.extraction || {};
+      if (extraction.screen === "contract") {
+        return data;
+      }
       return {
         ...data,
         extraction: {
-          ...(data.extraction || {}),
+          ...extraction,
           work_detail_output: getEffectiveOutput(data)
         }
       };
@@ -616,11 +655,19 @@
       textInputGroup.classList.toggle("hidden", mode !== "text");
     }
 
+    function setExtractionType(nextType) {
+      extractionType = nextType;
+      documentTypeBtn.classList.toggle("active", extractionType === "document");
+      contractTypeBtn.classList.toggle("active", extractionType === "contract");
+      projectSelect.disabled = extractionType === "contract" || !projectOptions.length;
+      renderSelectedProjectMeta(false);
+    }
+
     async function runFileExtraction() {
       if (!fileInput.files.length) throw new Error("Chưa chọn file.");
       const body = new FormData();
       body.append("file", fileInput.files[0]);
-      const response = await fetch("/api/ocr/extract", { method: "POST", body });
+      const response = await fetch(`/api/ocr/extract?type=${encodeURIComponent(extractionType)}`, { method: "POST", body });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "OCR thất bại.");
       return data;
@@ -632,7 +679,7 @@
       const response = await fetch("/api/llm/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text, type: extractionType })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Trích xuất thất bại.");
@@ -656,11 +703,11 @@
       pipelineValue.textContent = valueOrDash(extraction.pipeline);
       confidenceValue.textContent = formatScore(extraction.local_confidence);
       reviewValue.textContent = review ? "Có" : "Không";
-      matchValue.textContent = valueOrDash(match.status);
+      matchValue.textContent = extraction.screen === "contract" ? "Không áp dụng" : valueOrDash(match.status);
       providerValue.textContent = [data.llm?.provider, data.llm?.model].filter(Boolean).join(" / ") || "-";
 
-      workOutput.innerHTML = renderOutputGrid(output);
-      matchStatusTag.textContent = valueOrDash(match.status);
+      workOutput.innerHTML = renderOutputGrid(data);
+      matchStatusTag.textContent = extraction.screen === "contract" ? "Không áp dụng" : valueOrDash(match.status);
       matchStatusTag.className = `tag ${matchTagClass(match.status, review)}`;
       matchSummary.innerHTML = renderMatchSummary(match);
       candidateList.innerHTML = renderCandidates(match.best_candidates || {});
@@ -670,8 +717,26 @@
       setTab("fields");
     }
 
-    function renderOutputGrid(output) {
-      const items = [
+    function renderOutputGrid(data) {
+      const extraction = data?.extraction || {};
+      const output = getEffectiveOutput(data);
+      const items = extraction.screen === "contract" ? [
+        ["contract_number", "Số hợp đồng"],
+        ["signed_date", "Ngày ký"],
+        ["contract_name", "Tên hợp đồng"],
+        ["work_name", "Tên công việc"],
+        ["contract_value", "Giá trị hợp đồng"],
+        ["estimated_value", "Giá trị dự toán"],
+        ["contractor_name", "Tên nhà thầu"],
+        ["contractor_group", "Nhóm nhà thầu"],
+        ["contract_form", "Hình thức hợp đồng"],
+        ["execution_duration_days", "Thời gian thực hiện"],
+        ["contract_vat_percent", "VAT HĐ"],
+        ["performance_guarantee_value", "Bảo lãnh THHĐ"],
+        ["performance_guarantee_end_date", "Hết hạn BL THHĐ"],
+        ["advance_guarantee_value", "Bảo lãnh tạm ứng"],
+        ["advance_guarantee_end_date", "Hết hạn BL tạm ứng"]
+      ] : [
         ["document_number", "Số văn bản"],
         ["signed_or_effective_date", "Ngày/thời gian"],
         ["approved_value", "Giá trị duyệt"],
@@ -687,6 +752,13 @@
         ["notes", "Ghi chú"]
       ];
       return items.map(([key, label]) => fieldCard(label, output[key], key === "title" || key === "issuer" || key === "task_name" || key === "notes")).join("");
+    }
+
+    function contractOutput(fields) {
+      return Object.fromEntries(Object.entries(fields).map(([key, field]) => [
+        key,
+        field?.normalized_value ?? field?.value ?? null
+      ]));
     }
 
     function renderMatchSummary(match) {

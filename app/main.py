@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -16,9 +16,16 @@ from app.services.agribank_matching import (
     fetch_searchable_projects,
     get_project_tree_config,
 )
-from app.services.extraction import CONTRACT_FORMS, CONTRACTOR_GROUPS, extract_information
+from app.services.extraction import (
+    CONTRACT_FORMS,
+    CONTRACTOR_GROUPS,
+    apply_filename_document_number_hint,
+    extract_information,
+    normalize_extraction_type,
+)
 from app.services.google_document_ai_ocr import get_mime_type, ocr_document, ocr_document_with_layout
 from app.services.layout_matching import attach_field_boxes
+from app.services.ocr_cleaning import clean_ocr_chunks, clean_ocr_layout_result
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env", override=True)
@@ -36,6 +43,7 @@ app = FastAPI(
 
 class TextExtractionRequest(BaseModel):
     text: str = Field(..., min_length=1, description="OCR text hoặc nội dung văn bản cần trích xuất.")
+    type: str = Field("document", description="Extraction type: document hoặc contract.")
 
 
 class ApiError(Exception):
@@ -160,16 +168,21 @@ def demo_layout():
 
 
 @app.post("/api/ocr/extract")
-async def ocr_extract(file: Annotated[UploadFile, File(...)]):
+async def ocr_extract(
+    file: Annotated[UploadFile, File(...)],
+    extraction_type: Annotated[Optional[str], Query(alias="type")] = None,
+):
+    requested_type = parse_extraction_type(extraction_type)
     saved_path = save_upload(file)
     try:
-        chunks = run_google_ocr(str(saved_path))
+        chunks, ocr_cleaning = clean_ocr_chunks(run_google_ocr(str(saved_path)))
         full_text = "\n\n".join(text for text, _ in chunks).strip()
         if not full_text:
             raise HTTPException(status_code=422, detail="OCR không trích được text từ file.")
 
-        extraction = await extract_information(full_text)
-        extraction_data = await attach_work_detail_matches(extraction["data"], full_text)
+        extraction = await extract_information(full_text, extraction_type=requested_type)
+        extraction_data = apply_filename_document_number_hint(extraction["data"], file.filename)
+        extraction_data = await attach_work_detail_matches(extraction_data, full_text)
         return {
             "file": {
                 "name": file.filename,
@@ -178,6 +191,7 @@ async def ocr_extract(file: Annotated[UploadFile, File(...)]):
             },
             "ocr": {
                 "text": full_text,
+                "cleaning": ocr_cleaning,
                 "chunks": [
                     {
                         "text": text,
@@ -203,9 +217,11 @@ async def v1_extract_file(
     file: Annotated[Optional[UploadFile], File()] = None,
     project: Optional[str] = None,
     include_layout: bool = False,
+    extraction_type: Annotated[Optional[str], Query(alias="type")] = None,
 ):
     request_id = new_request_id()
     config = require_v1_project_tree(project, request_id)
+    requested_type = parse_extraction_type(extraction_type, request_id=request_id)
     if file is None:
         raise ApiError(422, "missing_file", "Missing upload file.", request_id=request_id)
 
@@ -222,13 +238,14 @@ async def v1_extract_file(
 
     try:
         if include_layout:
-            layout = run_google_ocr_layout_for_v1(str(saved_path), request_id)
+            layout = clean_ocr_layout_result(run_google_ocr_layout_for_v1(str(saved_path), request_id))
             full_text = str(layout["text"]).strip()
             if not full_text:
                 raise ApiError(422, "ocr_empty_text", "OCR did not extract text from the file.", request_id=request_id)
 
-            extraction = await extract_information(full_text)
-            extraction_data = await attach_work_detail_matches(extraction["data"], full_text, config.key)
+            extraction = await extract_information(full_text, extraction_type=requested_type)
+            extraction_data = apply_filename_document_number_hint(extraction["data"], file.filename)
+            extraction_data = await attach_work_detail_matches(extraction_data, full_text, config.key)
             extraction_data = attach_field_boxes(extraction_data, layout["segments"])
             return serialize_v1_extraction(
                 request_id=request_id,
@@ -241,17 +258,19 @@ async def v1_extract_file(
                     "name": file.filename,
                     "mime_type": get_mime_type(str(saved_path)),
                 },
+                ocr_cleaning=layout.get("cleaning"),
                 layout_pages=layout.get("pages") or [],
                 include_layout=True,
             )
 
-        chunks = run_google_ocr_for_v1(str(saved_path), request_id)
+        chunks, ocr_cleaning = clean_ocr_chunks(run_google_ocr_for_v1(str(saved_path), request_id))
         full_text = "\n\n".join(text for text, _ in chunks).strip()
         if not full_text:
             raise ApiError(422, "ocr_empty_text", "OCR did not extract text from the file.", request_id=request_id)
 
-        extraction = await extract_information(full_text)
-        extraction_data = await attach_work_detail_matches(extraction["data"], full_text, config.key)
+        extraction = await extract_information(full_text, extraction_type=requested_type)
+        extraction_data = apply_filename_document_number_hint(extraction["data"], file.filename)
+        extraction_data = await attach_work_detail_matches(extraction_data, full_text, config.key)
         return serialize_v1_extraction(
             request_id=request_id,
             config=config,
@@ -263,6 +282,7 @@ async def v1_extract_file(
                 "name": file.filename,
                 "mime_type": get_mime_type(str(saved_path)),
             },
+            ocr_cleaning=ocr_cleaning,
             include_layout=False,
         )
     finally:
@@ -271,16 +291,21 @@ async def v1_extract_file(
 
 
 @app.post("/api/ocr/extract-layout")
-async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
+async def ocr_extract_layout(
+    file: Annotated[UploadFile, File(...)],
+    extraction_type: Annotated[Optional[str], Query(alias="type")] = None,
+):
+    requested_type = parse_extraction_type(extraction_type)
     saved_path = save_upload(file)
     try:
-        layout = run_google_ocr_layout(str(saved_path))
+        layout = clean_ocr_layout_result(run_google_ocr_layout(str(saved_path)))
         full_text = layout["text"].strip()
         if not full_text:
             raise HTTPException(status_code=422, detail="OCR không trích được text từ file.")
 
-        extraction = await extract_information(full_text)
-        extraction_data = await attach_work_detail_matches(extraction["data"], full_text)
+        extraction = await extract_information(full_text, extraction_type=requested_type)
+        extraction_data = apply_filename_document_number_hint(extraction["data"], file.filename)
+        extraction_data = await attach_work_detail_matches(extraction_data, full_text)
         extraction_data = attach_field_boxes(extraction_data, layout["segments"])
         return {
             "file": {
@@ -290,6 +315,8 @@ async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
             },
             "ocr": {
                 "text": full_text,
+                "raw_text": layout.get("raw_text"),
+                "cleaning": layout.get("cleaning"),
                 "chunks": [
                     {
                         "text": text,
@@ -301,6 +328,7 @@ async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
             "layout": {
                 "pages": layout["pages"],
                 "segments": layout["segments"],
+                "removed_segments": (layout.get("cleaning") or {}).get("removed_segments", []),
             },
             "extraction": extraction_data,
             "llm": {
@@ -318,14 +346,17 @@ async def ocr_extract_layout(file: Annotated[UploadFile, File(...)]):
 async def v1_extract_text(
     payload: Annotated[Any, Body()] = None,
     project: Optional[str] = None,
+    extraction_type: Annotated[Optional[str], Query(alias="type")] = None,
 ):
     request_id = new_request_id()
     config = require_v1_project_tree(project, request_id)
     text = payload.get("text") if isinstance(payload, dict) else None
     if not isinstance(text, str) or not text.strip():
         raise ApiError(422, "invalid_text", "Request body must include non-empty text.", request_id=request_id)
+    payload_type = payload.get("type") if isinstance(payload, dict) else None
+    requested_type = parse_extraction_type(payload_type or extraction_type, request_id=request_id)
 
-    extraction = await extract_information(text)
+    extraction = await extract_information(text, extraction_type=requested_type)
     extraction_data = await attach_work_detail_matches(extraction["data"], text, config.key)
     return serialize_v1_extraction(
         request_id=request_id,
@@ -339,7 +370,8 @@ async def v1_extract_text(
 
 @app.post("/api/llm/extract")
 async def llm_extract(request: TextExtractionRequest):
-    extraction = await extract_information(request.text)
+    requested_type = parse_extraction_type(request.type)
+    extraction = await extract_information(request.text, extraction_type=requested_type)
     extraction_data = await attach_work_detail_matches(extraction["data"], request.text)
     return {
         "extraction": extraction_data,
@@ -353,6 +385,22 @@ async def llm_extract(request: TextExtractionRequest):
 
 def new_request_id() -> str:
     return uuid.uuid4().hex
+
+
+def parse_extraction_type(value: Optional[str], request_id: Optional[str] = None) -> str:
+    try:
+        return normalize_extraction_type(value)
+    except ValueError as exc:
+        message = "type must be either 'document' or 'contract'."
+        if request_id:
+            raise ApiError(
+                422,
+                "invalid_type",
+                message,
+                request_id=request_id,
+                details={"type": value},
+            ) from exc
+        raise HTTPException(status_code=422, detail=message) from exc
 
 
 def require_v1_project_tree(project: Optional[str], request_id: str) -> ProjectTreeConfig:
@@ -403,6 +451,7 @@ def serialize_v1_extraction(
     ocr_text: str,
     page_count: int,
     file_info: Optional[dict[str, Any]] = None,
+    ocr_cleaning: Optional[dict[str, Any]] = None,
     layout_pages: Optional[list[dict[str, Any]]] = None,
     include_layout: bool = False,
 ) -> dict[str, Any]:
@@ -428,10 +477,18 @@ def serialize_v1_extraction(
             "entity_extraction_used": bool(extraction_data.get("llm_entity_extraction_used", False)),
         },
     }
+    if isinstance(extraction_data.get("work_detail_fields"), dict):
+        response["work_detail_fields"] = serialize_fields(
+            extraction_data.get("work_detail_fields"),
+            include_boxes=include_layout,
+        )
+    if ocr_cleaning:
+        response["ocr"]["cleaning"] = ocr_cleaning
     if file_info is not None:
         response["file"] = file_info
-    if screen == "work_detail":
+    if isinstance(extraction_data.get("work_detail_output"), dict):
         response["work_detail"] = serialize_work_detail_output(extraction_data.get("work_detail_output"))
+    if isinstance(extraction_data.get("work_detail_match"), dict):
         response["match"] = serialize_work_detail_match(extraction_data.get("work_detail_match"))
     if include_layout:
         response["layout"] = {"pages": layout_pages or []}

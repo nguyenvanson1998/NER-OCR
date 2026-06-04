@@ -160,7 +160,7 @@ def test_v1_text_extract_returns_compact_contract(monkeypatch):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             return await client.post(
-                "/api/v1/extractions/text?project=opa",
+                "/api/v1/extractions/text?project=opa&type=contract",
                 json={
                     "text": """
 HỢP ĐỒNG THI CÔNG XÂY DỰNG
@@ -190,7 +190,60 @@ Giá trị hợp đồng: 1.200.000.000 đồng
     assert "entities" not in payload
     assert "taxonomies" not in payload
     assert "chunks" not in payload["ocr"]
+    assert "work_detail_fields" not in payload
+    assert "work_detail" not in payload
     assert "match" not in payload
+
+
+def test_v1_text_extract_defaults_to_document(monkeypatch):
+    async def run_request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/api/v1/extractions/text?project=opa",
+                json={
+                    "text": """
+HỢP ĐỒNG THI CÔNG XÂY DỰNG
+Số: 01/2026/HĐ-XD
+Hà Nội, ngày 01 tháng 02 năm 2026
+Giá trị hợp đồng: 1.200.000.000 đồng
+"""
+                },
+            )
+
+    monkeypatch.setenv("OPA_API_KEY", "opa-key")
+    monkeypatch.setenv("OPA_API_BASE_URL", "https://opa.test/api/v1")
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
+
+    response = asyncio.run(run_request())
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["document"]["type"] == "document"
+    assert payload["document"]["screen"] == "work_detail"
+    assert "contract_number" not in payload["fields"]
+    assert "document_number" in payload["fields"]
+
+
+def test_v1_text_extract_rejects_invalid_type(monkeypatch):
+    async def run_request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/api/v1/extractions/text?project=opa",
+                json={"text": "TỜ TRÌNH", "type": "invoice"},
+            )
+
+    monkeypatch.setenv("OPA_API_KEY", "opa-key")
+    monkeypatch.setenv("OPA_API_BASE_URL", "https://opa.test/api/v1")
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+
+    response = asyncio.run(run_request())
+    payload = response.json()
+
+    assert response.status_code == 422
+    assert payload["error"]["code"] == "invalid_type"
 
 
 def test_v1_projects_accepts_argibank_alias_and_normalizes(monkeypatch):
