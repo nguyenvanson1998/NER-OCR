@@ -97,7 +97,16 @@ LLM_SYSTEM_INSTRUCTION = (
     "'Công văn số ... ngày ...' hoặc bất kỳ trích dẫn pháp lý nào — đó là ngày của "
     "văn bản được tham chiếu, KHÔNG phải ngày ban hành văn bản hiện tại. "
     "Nếu không tìm thấy dòng 'địa danh, ngày ... tháng ... năm ...' dưới tiêu ngữ, "
-    "để signed_or_effective_date = null thay vì lấy đại một ngày khác."
+    "để signed_or_effective_date = null thay vì lấy đại một ngày khác. "
+    "QUY TẮC GIÁ TRỊ: trước hết xác định loại giấy tờ. Tờ trình/Văn bản đề nghị/"
+    "Hồ sơ trình (Tờ trình, TTr, đề nghị, trình thẩm định, trình phê duyệt, xin chấp thuận) "
+    "thì mọi tổng mức đầu tư/dự toán/kinh phí/giá trị đề nghị/giá tiền là submitted_value, "
+    "không phải approved_value dù tiêu đề có chữ phê duyệt. Quyết định/Văn bản phê duyệt/"
+    "Văn bản chấp thuận (QĐ, phê duyệt, chấp thuận, đồng ý, cho phép) thì map số tiền kết quả "
+    "đã duyệt/chấp thuận vào approved_value. Hợp đồng thì giá trị hợp đồng có thể map "
+    "approved_value, không map submitted_value. Biên lai/Phiếu thu/Chứng từ phí và văn bản "
+    "góp ý/tham gia ý kiến/cung cấp thông tin/giấy mời/phân công thì để trống giá trị "
+    "trình/duyệt nếu không có ngữ cảnh duyệt thật rõ."
 )
 
 COMMON_EXTRACTION_RULES = (
@@ -108,9 +117,10 @@ COMMON_EXTRACTION_RULES = (
 DOCUMENT_FIELD_RULES = """
 Rules document:
 - document_number: số văn bản ở đầu tài liệu; giữ dạng đã chuẩn hóa như 5771/NHNo-QLĐT.
-- signed_or_effective_date: BẮT BUỘC lấy từ dòng "<Địa danh>, ngày DD tháng MM năm YYYY" nằm NGAY DƯỚI tiêu ngữ "Độc lập - Tự do - Hạnh phúc" (góc phải/đầu văn bản). value=DD/MM/YYYY, normalized_value=YYYY-MM-DD. KHÔNG lấy ngày trong "Căn cứ ...", Luật/Nghị định/Thông tư/Quyết định số/Công văn số (đó là ngày của văn bản tham chiếu, không phải ngày ban hành). Nếu không tìm được dòng địa danh + ngày dưới tiêu ngữ thì để null.
-- approved_value: giá trị duyệt/phê duyệt/sau thẩm định; gồm giá gói thầu, giá dự toán gói thầu, tổng mức đầu tư/xây dựng/dự toán/kinh phí. Ví dụ "Tổng mức đầu tư: 26 tỷ đồng" => 26000000000.
-- submitted_value: giá trị trình/đề nghị/xin phê duyệt/trình duyệt/trước thẩm định.
+- signed_or_effective_date: BẮT BUỘC lấy từ dòng "<Địa danh>, ngày DD tháng MM năm YYYY" hoặc "<Địa danh>, Ngày DD, tháng MM, năm YYYY" nằm NGAY DƯỚI tiêu ngữ "Độc lập - Tự do - Hạnh phúc" (góc phải/đầu văn bản). value=DD/MM/YYYY, normalized_value=YYYY-MM-DD. KHÔNG lấy ngày trong "Căn cứ ...", Luật/Nghị định/Thông tư/Quyết định số/Công văn số (đó là ngày của văn bản tham chiếu, không phải ngày ban hành). Nếu không tìm được dòng địa danh + ngày dưới tiêu ngữ thì để null.
+- approved_value: chỉ map sau khi xác định văn bản là QUYẾT ĐỊNH/văn bản phê duyệt/chấp thuận/đồng ý/cho phép, hoặc là HỢP ĐỒNG có giá trị hợp đồng đã ký. Không map duyệt chỉ vì trong TỜ TRÌNH có chữ phê duyệt.
+- submitted_value: chỉ map sau khi xác định văn bản là TỜ TRÌNH/Văn bản đề nghị/Hồ sơ trình. Với nhóm này, mọi tổng giá trị/giá tiền/giá gói thầu/tổng mức đầu tư/dự toán/kinh phí/giá trị đề nghị đều là submitted_value.
+- Biên lai/Phiếu thu/Chứng từ phí và văn bản góp ý/tham gia ý kiến/cung cấp thông tin/giấy mời/phân công: không map submitted_value; chỉ map approved_value nếu văn bản thể hiện nghiệp vụ duyệt/chấp thuận rất rõ, nếu không thì để null.
 - issuer: đơn vị phát hành góc trái đầu tài liệu, không lấy Kính gửi.
 - title: loại văn bản + dòng Về việc/V/v/trích yếu nếu có; bắt đầu bằng HỢP ĐỒNG/CÔNG VĂN/QUYẾT ĐỊNH/VĂN BẢN/TỜ TRÌNH/BIÊN BẢN/BÁO CÁO/THÔNG BÁO/ĐỀ NGHỊ.
 """.strip()
@@ -128,7 +138,7 @@ CONTRACT_FIELD_RULES = CONTRACT_EXTRACTION_GUIDANCE
 
 FIELD_OBJECT_HINT = 'Field object={"value":string|null,"normalized_value":any|null,"evidence":string|null,"confidence":0-1}'
 DOCUMENT_SCHEMA_HINT = (
-    'Schema={"document_type":"document","document_intent":"to_trinh|quyet_dinh|bien_ban|cong_van|bao_cao|unknown",'
+    'Schema={"document_type":"document","document_intent":string,'
     '"fields":{document_number,signed_or_effective_date,approved_value,submitted_value,issuer,notes,title},'
     '"generic_extraction":{document_title_or_type,project_name_candidates,task_title_candidates,work_item_candidates,procurement_package_candidates,task_keywords,dates,monetary_amounts,document_numbers,approvers_or_positions},'
     '"entities":{projects,tasks,work_items,procurement_packages,business_actions,monetary_entities,organizations,people,locations},"notes":[]}'
@@ -167,11 +177,10 @@ def normalize_result(
 ) -> dict[str, Any]:
     text = clean_ocr_text(text)
     detected_type = normalize_extraction_type(extraction_type)
-    detected_intent = payload.get("document_intent") or classify_document_intent(text)
+    rule_intent = classify_document_intent(text)
+    detected_intent = choose_document_intent(rule_intent, payload.get("document_intent"))
     if detected_type == "contract":
         detected_intent = "contract"
-    elif detected_intent == "contract":
-        detected_intent = "unknown"
 
     field_schema = CONTRACT_FIELDS if detected_type == "contract" else DOCUMENT_FIELDS
     fields = payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
@@ -199,7 +208,7 @@ def normalize_result(
                 "source": raw.get("source") or payload_source,
             }
             candidate = normalize_candidate_field(key, candidate)
-            if should_replace_field(normalized_fields[key], candidate):
+            if should_replace_field(normalized_fields[key], candidate, key):
                 normalized_fields[key] = candidate
         elif raw not in (None, ""):
             candidate = {
@@ -210,8 +219,11 @@ def normalize_result(
                 "source": payload_source,
             }
             candidate = normalize_candidate_field(key, candidate)
-            if should_replace_field(normalized_fields[key], candidate):
+            if should_replace_field(normalized_fields[key], candidate, key):
                 normalized_fields[key] = candidate
+
+    if detected_type == "document":
+        apply_document_intent_value_rules(normalized_fields, detected_intent)
 
     generic = payload.get("generic_extraction")
     if not isinstance(generic, dict):
@@ -256,31 +268,174 @@ def classify_document(text: str) -> str:
     return "document"
 
 
+PROPOSAL_INTENTS = {"to_trinh", "van_ban_de_nghi", "ho_so_trinh"}
+APPROVAL_INTENTS = {"quyet_dinh", "van_ban_phe_duyet", "van_ban_chap_thuan"}
+CONTRACT_INTENTS = {"contract"}
+RECEIPT_INTENTS = {"bien_lai", "phieu_thu", "chung_tu_phi"}
+NO_VALUE_INTENTS = {
+    "gop_y",
+    "tham_gia_y_kien",
+    "cung_cap_thong_tin",
+    "giay_moi",
+    "phan_cong",
+    "bien_ban",
+    "bao_cao",
+    "thong_bao",
+    "cong_van",
+    "unknown",
+}
+
+
+def choose_document_intent(rule_intent: str, payload_intent: Any) -> str:
+    if rule_intent and rule_intent != "unknown":
+        return rule_intent
+    if isinstance(payload_intent, str) and payload_intent.strip():
+        return normalize_for_rules(payload_intent).replace(" ", "_")
+    return rule_intent or "unknown"
+
+
 def classify_document_intent(text: str) -> str:
     text = clean_ocr_text(text)
-    sample = text[:5000].lower()
-    document_title_prefixes = ("to trinh", "quyet dinh", "cong van", "bien ban", "bao cao", "thong bao")
-    for line in meaningful_lines(text, limit=30):
-        normalized_line = normalize_for_rules(line)
+    lines = meaningful_lines(text, limit=90)
+    normalized_lines = [normalize_for_rules(line) for line in lines]
+    context = normalize_for_rules(document_classification_context(lines))
+    sample = normalize_for_rules(text[:5000])
+
+    if has_strong_to_trinh_signal(normalized_lines, context):
+        return "to_trinh"
+    if has_receipt_signal(normalized_lines, context):
+        if any(line.startswith("bien lai") for line in normalized_lines):
+            return "bien_lai"
+        if any(line.startswith("phieu thu") for line in normalized_lines):
+            return "phieu_thu"
+        return "chung_tu_phi"
+    if has_contract_signal(normalized_lines, context, sample):
+        return "contract"
+    if has_strong_decision_signal(normalized_lines, context):
+        return "quyet_dinh"
+    informational_intent = classify_informational_intent(normalized_lines, context)
+    if informational_intent:
+        return informational_intent
+    if has_proposal_context(context):
+        if "ho so trinh" in context:
+            return "ho_so_trinh"
+        return "van_ban_de_nghi"
+    if has_approval_context(context):
+        if "phe duyet" in context:
+            return "van_ban_phe_duyet"
+        return "van_ban_chap_thuan"
+
+    document_title_prefixes = ("cong van", "bien ban", "bao cao", "thong bao")
+    for normalized_line in normalized_lines[:30]:
         for prefix in document_title_prefixes:
             if normalized_line.startswith(prefix):
                 return prefix.replace(" ", "_")
-
-    contract_hits = [
-        "hợp đồng",
-        "bên giao thầu",
-        "bên nhận thầu",
-        "giá trị hợp đồng",
-        "bảo lãnh thực hiện",
-        "tạm ứng hợp đồng",
-    ]
-    if sum(hit in sample for hit in contract_hits) >= 2:
-        return "contract"
     return "unknown"
 
 
+def document_classification_context(lines: list[str]) -> str:
+    selected: list[str] = []
+    for line in lines[:60]:
+        normalized = normalize_for_rules(line)
+        if normalized.startswith(("can cu", "xet de nghi", "theo de nghi")):
+            break
+        selected.append(line)
+    return "\n".join(selected or lines[:30])
+
+
+def has_strong_to_trinh_signal(normalized_lines: list[str], context: str) -> bool:
+    if any(line.startswith("to trinh") for line in normalized_lines[:40]):
+        return True
+    return bool(re.search(r"(?:^|[\s/-])ttr(?:[\s/-]|$)", context))
+
+
+def has_receipt_signal(normalized_lines: list[str], context: str) -> bool:
+    if any(line.startswith(("bien lai", "phieu thu", "chung tu phi")) for line in normalized_lines[:40]):
+        return True
+    return "so tien" in context and any(keyword in context for keyword in ("le phi", "phi tham dinh", "phi xay dung"))
+
+
+def has_contract_signal(normalized_lines: list[str], context: str, sample: str) -> bool:
+    if any(line.startswith("hop dong") for line in normalized_lines[:40]):
+        return True
+    contract_hits = (
+        "hop dong",
+        "ben a",
+        "ben b",
+        "ben giao thau",
+        "ben nhan thau",
+        "gia tri hop dong",
+        "gia hop dong",
+        "ky ket",
+    )
+    return sum(hit in sample for hit in contract_hits) >= 3 or (
+        "hop dong" in context and any(label in sample for label in ("gia tri hop dong", "gia hop dong"))
+    )
+
+
+def has_strong_decision_signal(normalized_lines: list[str], context: str) -> bool:
+    if any(line.startswith("quyet dinh") for line in normalized_lines[:40]):
+        return True
+    return bool(re.search(r"(?:^|[\s/-])qd(?:[\s/-]|$)", context))
+
+
+def has_proposal_context(context: str) -> bool:
+    proposal_phrases = (
+        "van ban de nghi",
+        "ho so trinh",
+        "de nghi",
+        "trinh tham dinh",
+        "trinh phe duyet",
+        "trinh chap thuan",
+        "xin chap thuan",
+        "xin phe duyet",
+        "kinh de nghi",
+    )
+    return any(phrase in context for phrase in proposal_phrases)
+
+
+def has_approval_context(context: str) -> bool:
+    approval_phrases = (
+        "van ban phe duyet",
+        "van ban chap thuan",
+        "phe duyet",
+        "chap thuan",
+        "dong y",
+        "cho phep",
+    )
+    return any(phrase in context for phrase in approval_phrases)
+
+
+def classify_informational_intent(normalized_lines: list[str], context: str) -> Optional[str]:
+    if "tham gia y kien" in context:
+        return "tham_gia_y_kien"
+    if "cung cap thong tin" in context:
+        return "cung_cap_thong_tin"
+    if "gop y" in context:
+        return "gop_y"
+    if any(line.startswith("giay moi") for line in normalized_lines[:40]) or "moi hop" in context:
+        return "giay_moi"
+    if "phan cong" in context:
+        return "phan_cong"
+    return None
+
+
+def document_value_role(document_intent: str) -> str:
+    if document_intent in PROPOSAL_INTENTS:
+        return "submitted"
+    if document_intent in APPROVAL_INTENTS:
+        return "approved"
+    if document_intent in CONTRACT_INTENTS:
+        return "contract_approved"
+    if document_intent in RECEIPT_INTENTS:
+        return "receipt"
+    if document_intent in NO_VALUE_INTENTS:
+        return "none"
+    return "none"
+
+
 def heuristic_generic_extraction(text: str) -> dict[str, Any]:
-    date_pattern = r"\b(?:ngày\s*)?\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|ngày\s+\d{1,2}\s+tháng\s+\d{1,2}\s+năm\s+\d{4}"
+    date_pattern = r"\b(?:ngày\s*)?\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|(?:ngày|ngay)\s*[,:.]?\s*\d{1,2}\s*[,;:.]?\s*(?:tháng|thang)\s+\d{1,2}\s*[,;:.]?\s*(?:năm|nam)\s+\d{4}"
     money_pattern = r"\b\d{1,3}(?:[.\s]\d{3})+(?:,\d+)?\s*(?:đồng|vnđ|vnd)?\b|\b\d+(?:,\d+)?\s*(?:tỷ|triệu)\s*(?:đồng)?\b"
     doc_no_pattern = r"(?:số|so)\s*[:.]?\s*([A-Z0-9ĐĐa-zÀ-ỹ/._-]{2,})"
     approver_pattern = r"(?:chủ tịch|giám đốc|phó giám đốc|trưởng phòng|kt\.|ký bởi|người ký|đại diện)\s*[:.]?\s*([A-ZÀ-Ỹ][^\n]{2,80})"
@@ -324,6 +479,8 @@ def guess_title(text: str) -> Optional[str]:
 
 
 def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    document_intent = classify_document_intent(text)
+    value_role = document_value_role(document_intent)
     title = extract_document_title(text)
     notes = extract_notes(text)
     fields: dict[str, dict[str, Any]] = {}
@@ -350,11 +507,17 @@ def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], lis
             confidence=confidence,
         )
 
-    approved_value = extract_labeled_money(
-        text,
-        MONEY_LABELS_APPROVED,
-        exclude_context_keywords=APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS,
-    )
+    approved_value = None
+    if value_role == "approved":
+        approved_value = extract_labeled_money(
+            text,
+            [*MONEY_LABELS_APPROVED, *MONEY_LABELS_GENERAL_AMOUNT],
+            exclude_context_keywords=APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS,
+        )
+    elif value_role == "contract_approved":
+        approved_value = extract_labeled_money(text, CONTRACT_VALUE_LABELS)
+    elif value_role == "receipt" and env_bool("MAP_RECEIPT_AMOUNT_TO_APPROVED", False):
+        approved_value = extract_labeled_money(text, MONEY_LABELS_GENERAL_AMOUNT)
     if approved_value:
         value, normalized_value, evidence, confidence = approved_value
         fields["approved_value"] = build_field(
@@ -365,7 +528,11 @@ def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], lis
             confidence=confidence,
         )
 
-    submitted_value = extract_labeled_money(text, MONEY_LABELS_SUBMITTED)
+    submitted_value = None
+    if value_role == "submitted":
+        submitted_value = extract_labeled_money(text, [*MONEY_LABELS_SUBMITTED, *MONEY_LABELS_GENERAL_AMOUNT])
+        if not submitted_value:
+            submitted_value = extract_labeled_money(text, MONEY_LABELS_APPROVED)
     if submitted_value:
         value, normalized_value, evidence, confidence = submitted_value
         fields["submitted_value"] = build_field(
@@ -691,9 +858,12 @@ def normalize_candidate_field(key: str, field: dict[str, Any]) -> dict[str, Any]
     return field
 
 
-def should_replace_field(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+def should_replace_field(existing: dict[str, Any], candidate: dict[str, Any], key: Optional[str] = None) -> bool:
     # If candidate has no value, don't replace
     if candidate.get("value") in (None, ""):
+        return False
+
+    if key in {"signed_or_effective_date", "signed_date"} and looks_like_reference_date_field(candidate):
         return False
 
     # If existing has no value, always replace with candidate
@@ -704,6 +874,14 @@ def should_replace_field(existing: dict[str, Any], candidate: dict[str, Any]) ->
     candidate_confidence = safe_float(candidate.get("confidence"))
     existing_source = existing.get("source", "rule")
     candidate_source = candidate.get("source", "rule")
+
+    if (
+        key in {"signed_or_effective_date", "signed_date"}
+        and existing_source == "rule"
+        and candidate_source == "llm"
+        and existing_confidence >= 0.9
+    ):
+        return False
 
     # Priority 1: LLM source should win over local/rule when confidence is close
     if candidate_source == "llm" and existing_source == "rule":
@@ -721,6 +899,54 @@ def should_replace_field(existing: dict[str, Any], candidate: dict[str, Any]) ->
         return False
 
     return False
+
+
+def looks_like_reference_date_field(field: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(field.get(key) or "")
+        for key in ("value", "normalized_value", "evidence")
+    )
+    normalized = normalize_for_rules(text)
+    return any(keyword in normalized for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS)
+
+
+def apply_document_intent_value_rules(fields: dict[str, dict[str, Any]], document_intent: str) -> None:
+    value_role = document_value_role(document_intent)
+    if value_role == "submitted":
+        approved = fields.get("approved_value") or empty_field(DOCUMENT_FIELDS["approved_value"])
+        submitted = fields.get("submitted_value") or empty_field(DOCUMENT_FIELDS["submitted_value"])
+        if approved.get("value") not in (None, "") and submitted.get("value") in (None, ""):
+            fields["submitted_value"] = {
+                **submitted,
+                **approved,
+                "label": DOCUMENT_FIELDS["submitted_value"],
+                "confidence": min(safe_float(approved.get("confidence")) or 0.78, 0.84),
+            }
+        fields["approved_value"] = empty_field(DOCUMENT_FIELDS["approved_value"])
+        return
+
+    if value_role in {"approved", "contract_approved"}:
+        approved = fields.get("approved_value") or empty_field(DOCUMENT_FIELDS["approved_value"])
+        submitted = fields.get("submitted_value") or empty_field(DOCUMENT_FIELDS["submitted_value"])
+        if submitted.get("value") not in (None, "") and approved.get("value") in (None, ""):
+            fields["approved_value"] = {
+                **approved,
+                **submitted,
+                "label": DOCUMENT_FIELDS["approved_value"],
+                "confidence": min(safe_float(submitted.get("confidence")) or 0.78, 0.84),
+            }
+            fields["submitted_value"] = empty_field(DOCUMENT_FIELDS["submitted_value"])
+        elif (
+            submitted.get("value") not in (None, "")
+            and approved.get("normalized_value") not in (None, "")
+            and approved.get("normalized_value") == submitted.get("normalized_value")
+        ):
+            fields["submitted_value"] = empty_field(DOCUMENT_FIELDS["submitted_value"])
+
+    if value_role in {"none", "receipt"}:
+        if value_role != "receipt" or not env_bool("MAP_RECEIPT_AMOUNT_TO_APPROVED", False):
+            fields["approved_value"] = empty_field(DOCUMENT_FIELDS["approved_value"])
+        fields["submitted_value"] = empty_field(DOCUMENT_FIELDS["submitted_value"])
 
 
 def extract_document_number(text: str) -> Optional[tuple[str, str]]:
@@ -841,21 +1067,29 @@ def should_use_filename_document_number_prefix(current_prefix: str, filename_pre
     return similarity >= 0.75
 
 
+DATE_REFERENCE_CONTEXT_KEYWORDS = (
+    "luat",
+    "luat so",
+    "nghi dinh",
+    "nghi quyet",
+    "thong tu",
+    "quyet dinh so",
+    "cong van so",
+    "can cu",
+)
+
+
 def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str, float]]:
     # Priority 1: Date under the national motto ("Độc lập - Tự do - Hạnh phúc")
     # in the form "<địa danh>, ngày DD tháng MM năm YYYY". The location prefix
     # with a comma is REQUIRED to avoid matching legal references like
     # "Luật số 43/2013/QH13 ngày 26 tháng 11 năm 2013".
-    LEGAL_CONTEXT_KEYWORDS = (
-        "luật", "nghị định", "nghị quyết", "thông tư",
-        "quyết định số", "căn cứ", "công văn số",
-    )
-
     # Vietnamese place-name prefix: Title-cased words (e.g. "Hà Nội", "TP. Hồ Chí Minh"),
     # 1-6 tokens, ending with a comma immediately before "ngày".
     location_date_pattern = re.compile(
-        r"([A-ZĐÀ-Ỹ][\wÀ-ỹ.]*(?:\s+[A-ZĐÀ-Ỹ\d][\wÀ-ỹ.]*){0,5})\s*,\s*"
-        r"ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})\s+năm\s+(\d{4})",
+        r"([A-ZĐÀ-Ỹ][\wÀ-ỹ.]*(?:[^\S\r\n]+[A-ZĐÀ-Ỹ\d][\wÀ-ỹ.]*){0,5})[^\S\r\n]*,[^\S\r\n]*"
+        r"(?:ngày|ngay)\s*[,:.]?\s*(\d{1,2})\s*[,;:.]?\s*"
+        r"(?:tháng|thang)\s+(\d{1,2})\s*[,;:.]?\s*(?:năm|nam)\s+(\d{4})",
         flags=re.IGNORECASE,
     )
 
@@ -870,8 +1104,8 @@ def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str,
 
     for header_match in location_date_pattern.finditer(header_text):
         context_start = max(0, header_match.start() - 120)
-        context = header_text[context_start : header_match.end()].lower()
-        if any(keyword in context for keyword in LEGAL_CONTEXT_KEYWORDS):
+        context = normalize_for_rules(header_text[context_start : header_match.end()])
+        if any(keyword in context for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS):
             continue
         _location, day, month, year = header_match.groups()
         normalized = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
@@ -892,8 +1126,8 @@ def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str,
         raw = clean_text(match.group(1))
 
         # Skip if this looks like a legal reference (contains Luật, Nghị định, etc.)
-        context = text[max(0, match.start() - 100):match.end() + 50].lower()
-        if any(keyword in context for keyword in ["luật", "nghị định", "nghị quyết", "thông tư", "quyết định số", "căn cứ"]):
+        context = normalize_for_rules(text[max(0, match.start() - 100):match.end() + 50])
+        if any(keyword in context for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS):
             continue
 
         date = extract_first_date(raw)
@@ -909,7 +1143,8 @@ def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str,
             continue
 
         # Skip lines that look like legal references
-        if any(keyword in line.lower() for keyword in ["luật", "nghị định", "nghị quyết", "thông tư", "căn cứ"]):
+        normalized_line = normalize_for_rules(line)
+        if any(keyword in normalized_line for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS):
             continue
 
         date = extract_first_date(line)
@@ -953,6 +1188,14 @@ MONEY_LABELS_APPROVED = [
     "nguồn vốn đầu tư",
 ]
 
+MONEY_LABELS_GENERAL_AMOUNT = [
+    "tổng giá trị",
+    "tổng giá tiền",
+    "giá tiền",
+    "tổng số tiền",
+    "số tiền",
+]
+
 MONEY_LABELS_SUBMITTED = [
     "giá trị trình",
     "giá trị đề nghị",
@@ -988,6 +1231,9 @@ TOTAL_INVESTMENT_LABELS = {
     "tong kinh phi",
     "kinh phi thuc hien",
     "nguon von dau tu",
+    "tong gia tri",
+    "tong gia tien",
+    "tong so tien",
 }
 
 CONTRACT_ESTIMATED_VALUE_LABELS = [
@@ -1651,7 +1897,11 @@ def normalize_money(value: str) -> Optional[int]:
 
 DATE_PATTERNS = [
     re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"),
-    re.compile(r"ngày\s+\d{1,2}\s+tháng\s+\d{1,2}\s+năm\s+\d{4}", flags=re.IGNORECASE),
+    re.compile(
+        r"(?:ngày|ngay)\s*[,:.]?\s*\d{1,2}\s*[,;:.]?\s*"
+        r"(?:tháng|thang)\s+\d{1,2}\s*[,;:.]?\s*(?:năm|nam)\s+\d{4}",
+        flags=re.IGNORECASE,
+    ),
 ]
 
 
@@ -1672,7 +1922,8 @@ def normalize_date(value: str) -> Optional[str]:
         return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
 
     words_match = re.search(
-        r"ngày\s+(\d{1,2})\s+tháng\s+(\d{1,2})\s+năm\s+(\d{4})",
+        r"(?:ngày|ngay)\s*[,:.]?\s*(\d{1,2})\s*[,;:.]?\s*"
+        r"(?:tháng|thang)\s+(\d{1,2})\s*[,;:.]?\s*(?:năm|nam)\s+(\d{4})",
         value,
         flags=re.IGNORECASE,
     )
@@ -1962,24 +2213,10 @@ async def call_vertex_gemini_extraction(config: dict[str, Any], prompt: str) -> 
                 location=config["location"]
             )
 
-            generation_config_kwargs = {
-                "system_instruction": LLM_SYSTEM_INSTRUCTION,
-                "temperature": 0,
-                "response_mime_type": "application/json",
-            }
-            # Disable internal "thinking" on Gemini 2.5 to reduce latency.
-            thinking_budget = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
-            try:
-                generation_config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    thinking_budget=thinking_budget
-                )
-            except AttributeError:
-                pass
-
             response = client.models.generate_content(
                 model=config["model"],
                 contents=[prompt],
-                config=types.GenerateContentConfig(**generation_config_kwargs),
+                config=types.GenerateContentConfig(**build_vertex_generation_config_kwargs(types)),
             )
             return response.text
 
@@ -2002,6 +2239,23 @@ async def call_vertex_gemini_extraction(config: dict[str, Any], prompt: str) -> 
             )
             response.raise_for_status()
         return parse_gemini_response(response.json())
+
+
+def build_vertex_generation_config_kwargs(types: Any) -> dict[str, Any]:
+    generation_config_kwargs = {
+        "system_instruction": LLM_SYSTEM_INSTRUCTION,
+        "temperature": 0,
+        "response_mime_type": "application/json",
+    }
+    # Disable internal "thinking" on Gemini 2.5 family to reduce latency.
+    thinking_budget = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+    try:
+        generation_config_kwargs["thinking_config"] = types.ThinkingConfig(
+            thinking_budget=thinking_budget
+        )
+    except AttributeError:
+        pass
+    return generation_config_kwargs
 
 
 def build_gemini_payload(prompt: str) -> dict[str, Any]:
