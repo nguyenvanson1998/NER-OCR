@@ -667,10 +667,74 @@
       if (!fileInput.files.length) throw new Error("Chưa chọn file.");
       const body = new FormData();
       body.append("file", fileInput.files[0]);
-      const response = await fetch(`/api/ocr/extract?type=${encodeURIComponent(extractionType)}`, { method: "POST", body });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "OCR thất bại.");
-      return data;
+      const submitUrl = `/api/v2/extractions/file?project=agribank&type=${encodeURIComponent(extractionType)}&include_layout=true`;
+      const submitResp = await fetch(submitUrl, { method: "POST", body });
+      const submitJson = await submitResp.json().catch(() => ({}));
+      if (submitResp.status >= 400) {
+        throw new Error(submitJson?.error?.message || submitJson?.detail || `OCR submit thất bại (${submitResp.status}).`);
+      }
+      let record = submitJson;
+      // Render intermediate state if OCR already done (small file sync path -> rev 1).
+      if (record?.result?.ocr?.text) {
+        setStatus("Đang enrich (LLM + matching)...", "warn");
+        try { render(adaptV2ToV1(record)); } catch (_) { /* best-effort */ }
+      } else {
+        setStatus("Đang OCR file lớn...", "warn");
+      }
+      // Poll until terminal (completed / completed_with_warnings / failed) or deadline.
+      const jobId = record.job_id;
+      if (!jobId) throw new Error("Server không trả job_id.");
+      const deadline = Date.now() + 180000; // 3 min hard cap
+      let lastRevision = record.revision || 0;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 800));
+        const pollResp = await fetch(`/api/v2/extractions/${jobId}`);
+        const pollJson = await pollResp.json().catch(() => ({}));
+        if (pollResp.status >= 400 && pollResp.status !== 202) {
+          throw new Error(pollJson?.error?.message || `Polling thất bại (${pollResp.status}).`);
+        }
+        record = pollJson;
+        // Re-render when revision advances and OCR is available (smoother UX for async OCR).
+        if ((record.revision || 0) > lastRevision && record?.result?.ocr?.text) {
+          lastRevision = record.revision;
+          try { render(adaptV2ToV1(record)); } catch (_) { /* best-effort */ }
+        }
+        if (["completed", "completed_with_warnings", "failed"].includes(record.status)) break;
+      }
+      if (record.status === "failed") {
+        throw new Error((record.warnings || []).join("; ") || "OCR job failed.");
+      }
+      if (!["completed", "completed_with_warnings"].includes(record.status)) {
+        throw new Error("Job chưa hoàn tất sau 3 phút.");
+      }
+      return adaptV2ToV1(record);
+    }
+
+    function adaptV2ToV1(record) {
+      const result = record?.result || {};
+      const llm = result.llm || {};
+      const doc = result.document || {};
+      let pipeline = "local";
+      if (llm.fallback_used) pipeline = "local_with_llm_fallback";
+      else if (llm.provider && llm.provider !== "local") pipeline = "llm";
+      return {
+        file: result.file || { name: "-", mime_type: "" },
+        ocr: result.ocr || { text: "", chunks: [] },
+        llm: { provider: llm.provider, model: llm.model },
+        extraction: {
+          document_type: doc.type,
+          screen: doc.screen,
+          document_intent: doc.intent,
+          needs_review: doc.needs_review,
+          fields: result.fields || {},
+          work_detail_fields: result.work_detail_fields,
+          work_detail_output: result.work_detail || {},
+          work_detail_match: result.match || {},
+          pipeline,
+          local_confidence: null,
+          llm_fallback_used: llm.fallback_used,
+        },
+      };
     }
 
     async function runTextExtraction() {

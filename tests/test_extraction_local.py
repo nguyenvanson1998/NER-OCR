@@ -66,6 +66,7 @@ def test_gemini_entity_extraction_uses_compact_prompt(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
     monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("LLM_EXECUTION_MODE", "always")
     monkeypatch.setattr(extraction, "call_llm_extraction", fake_call)
 
     result = asyncio.run(extraction.extract_information(text))
@@ -514,6 +515,7 @@ def test_gemini_entities_are_kept_for_matching(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LOCAL_EXTRACTION_ENABLED", "true")
     monkeypatch.setenv("LLM_FALLBACK_ENABLED", "true")
+    monkeypatch.setenv("LLM_EXECUTION_MODE", "always")
     monkeypatch.setattr(extraction, "call_llm_extraction", fake_call)
 
     result = asyncio.run(extraction.extract_information(SAMPLE_TEXT))

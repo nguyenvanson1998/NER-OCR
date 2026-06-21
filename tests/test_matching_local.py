@@ -199,6 +199,7 @@ def test_llm_tiebreaker_picks_project_when_below_threshold(monkeypatch):
     _setup_weak_match(monkeypatch)
     monkeypatch.setenv("LLM_MATCH_TIEBREAKER_ENABLED", "true")
     monkeypatch.setenv("LLM_MATCH_TIEBREAKER_CONFIDENCE", "0.6")
+    monkeypatch.setenv("LLM_MATCH_TIEBREAKER_MAX_GAP", "0.30")
 
     calls: dict[str, int] = {"project": 0, "task": 0}
 
@@ -227,6 +228,7 @@ def test_llm_tiebreaker_skips_when_confidence_low(monkeypatch):
     _setup_weak_match(monkeypatch)
     monkeypatch.setenv("LLM_MATCH_TIEBREAKER_ENABLED", "true")
     monkeypatch.setenv("LLM_MATCH_TIEBREAKER_CONFIDENCE", "0.6")
+    monkeypatch.setenv("LLM_MATCH_TIEBREAKER_MAX_GAP", "0.30")
 
     async def fake_pick_project(text, title, queries, candidates):
         return {"chosen_id": "p1", "confidence": 0.4, "reasoning": "Không chắc"}

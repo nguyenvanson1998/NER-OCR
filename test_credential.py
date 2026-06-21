@@ -253,6 +253,59 @@ def test_vertex_embeddings():
 
 
 # ============================================================================
+# TEST 5: Cloud Vision OCR (files:annotate)
+# ============================================================================
+def test_cloud_vision():
+    """Test Cloud Vision files:annotate against a sample PDF."""
+    print("\n👁️  TEST 5: CLOUD VISION OCR")
+    print("-" * 80)
+
+    sample_pdf = None
+    for candidate in (BASE_DIR / "data" / "tailieu" / "1.pdf", BASE_DIR / "data" / "hopdong" / "1.pdf"):
+        if candidate.exists():
+            sample_pdf = candidate
+            break
+
+    if sample_pdf is None:
+        print("❌ FAILED: Không tìm thấy PDF mẫu trong data/tailieu hoặc data/hopdong")
+        return False
+
+    try:
+        import asyncio
+        from app.services.vision_ocr import ocr_pdf_with_vision, close_vision_client
+
+        print(f"🔍 Đang gọi Vision API với: {sample_pdf.relative_to(BASE_DIR)}")
+
+        async def run() -> dict:
+            try:
+                return await ocr_pdf_with_vision(str(sample_pdf))
+            finally:
+                await close_vision_client()
+
+        result = asyncio.run(run())
+        quality = result.get("quality") or {}
+        print("✅ PASSED: Cloud Vision accessible!")
+        print(f"   - Pages parsed: {quality.get('page_count')}")
+        print(f"   - Word count: {quality.get('word_count')}")
+        print(f"   - Mean word confidence: {quality.get('mean_word_confidence')}")
+        print(f"   - Segments: {len(result.get('segments') or [])}")
+        return True
+
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "403" in error_msg or "disabled" in error_msg or "permission" in error_msg:
+            print("❌ FAILED: Vision API chưa được enable hoặc thiếu quyền")
+            print(f'   - Chạy: gcloud services enable vision.googleapis.com --project "{PROJECT_ID}"')
+            print('   - Cấp role "roles/serviceusage.serviceUsageConsumer" cho service account')
+        elif "401" in error_msg or "unauthenticated" in error_msg:
+            print("❌ FAILED: Authentication error khi gọi Vision API")
+        else:
+            print(f"❌ FAILED: {type(e).__name__}")
+            print(f"   - Chi tiết: {str(e)[:300]}")
+        return False
+
+
+# ============================================================================
 # RUN ALL TESTS
 # ============================================================================
 if __name__ == "__main__":
@@ -261,6 +314,7 @@ if __name__ == "__main__":
         "Document AI": test_document_ai(),
         "Gemini API": test_gemini_api(),
         "Vertex Embeddings": test_vertex_embeddings(),
+        "Cloud Vision": test_cloud_vision(),
     }
 
     print("\n" + "=" * 80)

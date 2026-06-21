@@ -209,6 +209,64 @@
       gap: 10px;
       padding: 14px;
     }
+    .ocr-section {
+      padding: 14px;
+      border-top: 1px solid #d9e1ea;
+      background: #fbfcfd;
+    }
+    .ocr-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .ocr-title {
+      font-size: 12px;
+      font-weight: 750;
+      color: #1a2433;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .ocr-meta {
+      font-size: 11px;
+      color: #607287;
+    }
+    .ocr-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .ocr-btn {
+      font: inherit;
+      font-size: 11px;
+      padding: 4px 10px;
+      border: 1px solid #d9e1ea;
+      border-radius: 6px;
+      background: #ffffff;
+      cursor: pointer;
+      color: #1a2433;
+    }
+    .ocr-btn:hover { border-color: #6b8aff; color: #1f3a8a; }
+    .ocr-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .ocr-text {
+      max-height: 360px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 10px 12px;
+      border: 1px solid #d9e1ea;
+      border-radius: 8px;
+      background: #ffffff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      color: #1a2433;
+    }
+    .ocr-text.collapsed {
+      max-height: 0;
+      padding: 0;
+      border: none;
+    }
     .field {
       border: 1px solid #d9e1ea;
       border-radius: 8px;
@@ -314,6 +372,19 @@
       <div id="fields" class="field-list">
         <div class="empty">Kết quả trích xuất sẽ hiển thị tại đây.</div>
       </div>
+      <div class="ocr-section">
+        <div class="ocr-head">
+          <div>
+            <div class="ocr-title">OCR text</div>
+            <div id="ocrMeta" class="ocr-meta">-</div>
+          </div>
+          <div class="ocr-actions">
+            <button id="ocrToggleBtn" class="ocr-btn" type="button" disabled>Ẩn</button>
+            <button id="ocrCopyBtn" class="ocr-btn" type="button" disabled>Copy</button>
+          </div>
+        </div>
+        <pre id="ocrText" class="ocr-text">Chưa có dữ liệu OCR.</pre>
+      </div>
     </aside>
   </main>
 
@@ -333,6 +404,27 @@
     const docTypeEl = document.getElementById("docType");
     const llmInfoEl = document.getElementById("llmInfo");
     const boxCountEl = document.getElementById("boxCount");
+    const ocrTextEl = document.getElementById("ocrText");
+    const ocrMetaEl = document.getElementById("ocrMeta");
+    const ocrToggleBtn = document.getElementById("ocrToggleBtn");
+    const ocrCopyBtn = document.getElementById("ocrCopyBtn");
+
+    ocrToggleBtn.addEventListener("click", () => {
+      const collapsed = ocrTextEl.classList.toggle("collapsed");
+      ocrToggleBtn.textContent = collapsed ? "Hiện" : "Ẩn";
+    });
+    ocrCopyBtn.addEventListener("click", async () => {
+      const text = ocrTextEl.textContent || "";
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        const prev = ocrCopyBtn.textContent;
+        ocrCopyBtn.textContent = "Copied";
+        setTimeout(() => { ocrCopyBtn.textContent = prev; }, 1200);
+      } catch (_) {
+        /* clipboard unavailable */
+      }
+    });
 
     let pageOverlays = new Map();
     let resultData = null;
@@ -355,9 +447,34 @@
         await renderLocalDocument(file);
         const body = new FormData();
         body.append("file", file);
-        const response = await fetch(`/api/ocr/extract-layout?type=${encodeURIComponent(extractionType)}`, { method: "POST", body });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.detail || "Không xử lý được tài liệu.");
+        const submitUrl = `/api/v2/extractions/file?project=agribank&type=${encodeURIComponent(extractionType)}&include_layout=true`;
+        const submitResp = await fetch(submitUrl, { method: "POST", body });
+        const submitJson = await submitResp.json().catch(() => ({}));
+        if (submitResp.status >= 400) {
+          throw new Error(submitJson?.error?.message || submitJson?.detail || `OCR submit thất bại (${submitResp.status}).`);
+        }
+        const jobId = submitJson.job_id;
+        if (!jobId) throw new Error("Server không trả job_id.");
+        statusEl.textContent = submitJson?.result?.ocr?.text ? "Đang enrich (LLM + matching)..." : "Đang OCR file lớn...";
+        let record = submitJson;
+        const deadline = Date.now() + 180000;
+        while (Date.now() < deadline) {
+          if (["completed", "completed_with_warnings", "failed"].includes(record.status)) break;
+          await new Promise((r) => setTimeout(r, 800));
+          const pollResp = await fetch(`/api/v2/extractions/${jobId}`);
+          const pollJson = await pollResp.json().catch(() => ({}));
+          if (pollResp.status >= 400 && pollResp.status !== 202) {
+            throw new Error(pollJson?.error?.message || `Polling thất bại (${pollResp.status}).`);
+          }
+          record = pollJson;
+        }
+        if (record.status === "failed") {
+          throw new Error((record.warnings || []).join("; ") || "OCR job failed.");
+        }
+        if (!["completed", "completed_with_warnings"].includes(record.status)) {
+          throw new Error("Job chưa hoàn tất sau 3 phút.");
+        }
+        const data = adaptV2ToV1(record);
         resultData = data;
         renderResults(data);
         renderBoxes(data);
@@ -369,6 +486,29 @@
       }
     });
 
+    function adaptV2ToV1(record) {
+      const result = record?.result || {};
+      const llm = result.llm || {};
+      const doc = result.document || {};
+      return {
+        file: result.file || { name: "-", mime_type: "" },
+        ocr: result.ocr || { text: "", chunks: [] },
+        llm: { provider: llm.provider, model: llm.model },
+        extraction: {
+          document_type: doc.type,
+          document_type_label: doc.type,
+          screen: doc.screen,
+          document_intent: doc.intent,
+          needs_review: doc.needs_review,
+          fields: result.fields || {},
+          work_detail_fields: result.work_detail_fields,
+          work_detail_output: result.work_detail || {},
+          work_detail_match: result.match || {},
+        },
+        layout: result.layout || { pages: [], segments: [] },
+      };
+    }
+
     function resetScreen() {
       resultData = null;
       activeKey = null;
@@ -378,6 +518,12 @@
       docTypeEl.textContent = "-";
       llmInfoEl.textContent = "-";
       boxCountEl.textContent = "-";
+      ocrTextEl.textContent = "Chưa có dữ liệu OCR.";
+      ocrTextEl.classList.remove("collapsed");
+      ocrMetaEl.textContent = "-";
+      ocrToggleBtn.textContent = "Ẩn";
+      ocrToggleBtn.disabled = true;
+      ocrCopyBtn.disabled = true;
     }
 
     function setExtractionType(nextType) {
@@ -450,6 +596,16 @@
       docTypeEl.textContent = extraction.document_type_label || extraction.document_type || "-";
       llmInfoEl.textContent = `${data.llm?.provider || "-"} ${data.llm?.model || ""}`.trim();
       boxCountEl.textContent = `${boxedFields}/${Object.keys(fields).length}`;
+
+      const ocrText = (data.ocr?.text || "").trim();
+      ocrTextEl.textContent = ocrText || "Không có dữ liệu OCR.";
+      const pageCount = data.ocr?.page_count ?? (data.layout?.pages?.length ?? 0);
+      ocrMetaEl.textContent = ocrText
+        ? `${ocrText.length.toLocaleString("vi-VN")} ký tự · ${pageCount} trang · provider: ${data.ocr?.provider || "-"}`
+        : "Không có dữ liệu OCR.";
+      const hasText = Boolean(ocrText);
+      ocrToggleBtn.disabled = !hasText;
+      ocrCopyBtn.disabled = !hasText;
 
       const rows = Object.entries(fields).map(([key, field]) => {
         const value = field.value || "Không có thông tin";

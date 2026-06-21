@@ -5,18 +5,46 @@ import platform
 import re
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
 from google.api_core.client_options import ClientOptions
+from google.api_core.retry import Retry
 from google.cloud import documentai
 from google.protobuf.json_format import MessageToDict
 from pypdf import PdfReader, PdfWriter
+
+from app.services.timing import timed_stage
 
 logger = logging.getLogger("ner_ocr")
 
 ONLINE_MAX_SIZE = 40 * 1024 * 1024
 ONLINE_MAX_PAGES_PDF = 14
+
+
+def _process_document_request(
+    client: documentai.DocumentProcessorServiceClient,
+    request: documentai.ProcessRequest,
+    *,
+    processor_kind: str,
+    page_offset: int,
+):
+    timeout = float(os.getenv("DOCUMENT_AI_RPC_TIMEOUT_SECONDS", "60"))
+    retry_deadline = float(os.getenv("DOCUMENT_AI_RETRY_DEADLINE_SECONDS", "75"))
+    with timed_stage(
+        "document_ai_rpc",
+        processor=processor_kind,
+        page_offset=page_offset,
+        timeout_seconds=timeout,
+    ):
+        return client.process_document(
+            request=request,
+            timeout=timeout,
+            retry=Retry(deadline=retry_deadline),
+        )
 
 
 def get_file_type(path: str) -> str:
@@ -214,7 +242,12 @@ def _process_with_enterprise_ocr(
         name=name,
         raw_document=documentai.RawDocument(content=image_content, mime_type=mime_type),
     )
-    result = client.process_document(request=request)
+    result = _process_document_request(
+        client,
+        request,
+        processor_kind="enterprise_ocr",
+        page_offset=page_offset,
+    )
     doc = result.document
 
     chunks: list[tuple[str, dict]] = []
@@ -249,7 +282,12 @@ def _process_with_enterprise_ocr_layout(
         name=name,
         raw_document=documentai.RawDocument(content=image_content, mime_type=mime_type),
     )
-    result = client.process_document(request=request)
+    result = _process_document_request(
+        client,
+        request,
+        processor_kind="enterprise_ocr_layout",
+        page_offset=page_offset,
+    )
     doc = result.document
 
     chunks = []
@@ -306,7 +344,12 @@ def _process_with_layout_parser(
         raw_document=documentai.RawDocument(content=image_content, mime_type=mime_type),
         process_options=process_options,
     )
-    result = client.process_document(request=request)
+    result = _process_document_request(
+        client,
+        request,
+        processor_kind="layout_parser",
+        page_offset=page_offset,
+    )
 
     chunks: list[tuple[str, dict]] = []
     for chunk in getattr(result.document.chunked_document, "chunks", []):
@@ -353,25 +396,39 @@ def ocr_document(
             reader = PdfReader(current_file_path)
             if len(reader.pages) > max_pages:
                 all_chunks: list[tuple[str, dict]] = []
-                for part_path, start_page in _split_pdf(current_file_path, str(Path(current_file_path).parent), max_pages):
+                with timed_stage("ocr_pdf_split", pages=len(reader.pages), max_pages=max_pages):
+                    parts = _split_pdf(current_file_path, str(Path(current_file_path).parent), max_pages)
+                for part_path, _start_page in parts:
                     temp_files_to_cleanup.append(part_path)
-                    all_chunks.extend(
-                        ocr_document(
-                            enterprise_project_id=enterprise_project_id,
-                            layout_project_id=layout_project_id,
-                            location=location,
-                            layout_processor_id=layout_processor_id,
-                            layout_processor_version=layout_processor_version,
-                            enterprise_processor_id=enterprise_processor_id,
-                            file_path=part_path,
-                            mime_type="application/pdf",
-                            chunk_size=chunk_size,
-                            include_ancestor_headings=include_ancestor_headings,
-                            page_offset=start_page,
-                            max_pages=max_pages,
-                            _is_recursive_call=True,
-                        )
+                workers = min(len(parts), max(1, int(os.getenv("OCR_MAX_PARALLEL_PARTS", "2"))))
+                calls = [
+                    partial(
+                        ocr_document,
+                        enterprise_project_id=enterprise_project_id,
+                        layout_project_id=layout_project_id,
+                        location=location,
+                        layout_processor_id=layout_processor_id,
+                        layout_processor_version=layout_processor_version,
+                        enterprise_processor_id=enterprise_processor_id,
+                        file_path=part_path,
+                        mime_type="application/pdf",
+                        chunk_size=chunk_size,
+                        include_ancestor_headings=include_ancestor_headings,
+                        page_offset=start_page,
+                        max_pages=max_pages,
+                        _is_recursive_call=True,
                     )
+                    for part_path, start_page in parts
+                ]
+                with timed_stage("ocr_pdf_parts", parts=len(parts), workers=workers):
+                    if workers == 1:
+                        results = [call() for call in calls]
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as executor:
+                            futures = [executor.submit(copy_context().run, call) for call in calls]
+                            results = [future.result() for future in futures]
+                for chunks in results:
+                    all_chunks.extend(chunks)
                 return all_chunks
 
         if mime_type == "application/pdf":
@@ -435,9 +492,14 @@ def ocr_document_with_layout(
             reader = PdfReader(current_file_path)
             if len(reader.pages) > max_pages:
                 merged = {"text": "", "chunks": [], "pages": [], "segments": []}
-                for part_path, start_page in _split_pdf(current_file_path, str(Path(current_file_path).parent), max_pages):
+                with timed_stage("ocr_pdf_split", pages=len(reader.pages), max_pages=max_pages):
+                    parts = _split_pdf(current_file_path, str(Path(current_file_path).parent), max_pages)
+                for part_path, _start_page in parts:
                     temp_files_to_cleanup.append(part_path)
-                    part = ocr_document_with_layout(
+                workers = min(len(parts), max(1, int(os.getenv("OCR_MAX_PARALLEL_PARTS", "2"))))
+                calls = [
+                    partial(
+                        ocr_document_with_layout,
                         enterprise_project_id=enterprise_project_id,
                         location=location,
                         enterprise_processor_id=enterprise_processor_id,
@@ -447,6 +509,16 @@ def ocr_document_with_layout(
                         max_pages=max_pages,
                         _is_recursive_call=True,
                     )
+                    for part_path, start_page in parts
+                ]
+                with timed_stage("ocr_pdf_parts", parts=len(parts), workers=workers):
+                    if workers == 1:
+                        results = [call() for call in calls]
+                    else:
+                        with ThreadPoolExecutor(max_workers=workers) as executor:
+                            futures = [executor.submit(copy_context().run, call) for call in calls]
+                            results = [future.result() for future in futures]
+                for part in results:
                     merged["chunks"].extend(part["chunks"])
                     merged["pages"].extend(part["pages"])
                     merged["segments"].extend(part["segments"])

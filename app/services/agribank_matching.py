@@ -1,3 +1,4 @@
+import asyncio
 import difflib
 import json
 import logging
@@ -10,6 +11,9 @@ from typing import Any
 from typing import Optional
 
 import httpx
+
+from app.services.timing import record_timing_event
+from app.services.timing import timed_stage
 
 try:
     from rapidfuzz import fuzz
@@ -28,6 +32,9 @@ SEARCHABLE_PROJECT_STATUSES = {"executing", "preparing", "closed"}
 PROJECT_CACHE: dict[str, tuple[float, Any]] = {}
 TASK_CACHE: dict[str, tuple[float, Any]] = {}
 TEXT_INDEX_CACHE: dict[str, tuple[float, Any]] = {}
+_DISTRIBUTED_CACHE_CLIENT: Any = None
+_CACHE_REFRESH_TASKS: set[asyncio.Task] = set()
+_CACHE_REFRESH_KEYS: set[str] = set()
 PROJECT_TREE_ALIASES = {
     "agribank": "agribank",
     "argibank": "agribank",
@@ -340,8 +347,8 @@ async def attach_work_detail_matches(
     project_queries = build_project_queries(extraction, title)
     task_queries = build_task_queries(title, extraction)
     logger.info(
-        "STEP start | title=%r | project_queries=%d | task_queries=%d",
-        title[:120],
+        "STEP start | title_chars=%d | project_queries=%d | task_queries=%d",
+        len(title),
         len(project_queries),
         len(task_queries),
     )
@@ -384,7 +391,8 @@ async def attach_work_detail_matches(
         extraction["work_detail_output"] = build_work_detail_output(extraction)
         return extraction
 
-    project_candidates = rank_projects(project_queries, projects, cache_key=f"{config.key}:projects:searchable")
+    with timed_stage("project_ranking", candidates=len(projects), queries=len(project_queries)):
+        project_candidates = rank_projects(project_queries, projects, cache_key=f"{config.key}:projects:searchable")
     match_info["best_candidates"]["projects"] = project_candidates[:3]
     project_match = project_candidates[0] if project_candidates else None
     project_threshold = env_float("PROJECT_MATCH_THRESHOLD", env_float("AGRIBANK_PROJECT_MATCH_THRESHOLD", 0.78))
@@ -401,7 +409,7 @@ async def attach_work_detail_matches(
         logger.info("STEP project matched (local) | id=%s | code=%s", project_match.get("id"), project_match.get("code"))
     else:
         tiebreaker_result: Optional[dict[str, Any]] = None
-        if llm_tiebreaker_enabled():
+        if llm_tiebreaker_allowed(top_score, project_threshold, project_candidates):
             logger.info(
                 "STEP project_tiebreaker -> LLM | top_score=%.4f < threshold=%.2f | candidates=%d",
                 top_score,
@@ -423,13 +431,18 @@ async def attach_work_detail_matches(
                     project_candidates[: llm_tiebreaker_top_n()],
                     tree_name=config.display_name,
                 )
-            logger.info("STEP project_tiebreaker result=%s", tiebreaker_result)
+            logger.info(
+                "STEP project_tiebreaker result | chosen_id=%s | confidence=%.4f | error=%s",
+                (tiebreaker_result or {}).get("chosen_id"),
+                float((tiebreaker_result or {}).get("confidence") or 0.0),
+                bool((tiebreaker_result or {}).get("error")),
+            )
             if tiebreaker_result:
                 match_info.setdefault("llm_tiebreaker", {})["project"] = tiebreaker_result
                 if tiebreaker_result.get("error"):
                     match_info["warnings"].append(tiebreaker_result["error"])
         else:
-            logger.info("STEP project_tiebreaker SKIPPED (LLM_MATCH_TIEBREAKER_ENABLED=false)")
+            logger.info("STEP project_tiebreaker SKIPPED (disabled or score outside configured gap)")
         confidence = float(tiebreaker_result.get("confidence", 0.0)) if tiebreaker_result and not tiebreaker_result.get("error") else 0.0
         if tiebreaker_result and not tiebreaker_result.get("error") and confidence >= llm_tiebreaker_confidence():
             chosen = next(
@@ -443,7 +456,10 @@ async def attach_work_detail_matches(
                 logger.info("STEP project matched (LLM) | id=%s | confidence=%.4f", chosen.get("id"), confidence)
         if not match_info.get("project"):
             match_info["status"] = "not_matched"
-            logger.warning("STEP project NOT MATCHED | tiebreaker=%s", tiebreaker_result)
+            logger.warning(
+                "STEP project NOT MATCHED | tiebreaker_used=%s",
+                bool(tiebreaker_result),
+            )
             if tiebreaker_result and not tiebreaker_result.get("error"):
                 match_info["warnings"].append("LLM tiebreaker did not confirm any project candidate.")
             elif project_candidates:
@@ -471,7 +487,8 @@ async def attach_work_detail_matches(
         extraction["work_detail_output"] = build_work_detail_output(extraction)
         return extraction
 
-    task_candidates = rank_tasks(task_queries, tasks, str(project_match["id"]), project_tree=config.key)
+    with timed_stage("task_ranking", candidates=len(tasks), queries=len(task_queries)):
+        task_candidates = rank_tasks(task_queries, tasks, str(project_match["id"]), project_tree=config.key)
     match_info["best_candidates"]["tasks"] = task_candidates[:3]
     task_match = task_candidates[0] if task_candidates else None
     task_threshold = env_float("TASK_MATCH_THRESHOLD", env_float("AGRIBANK_TASK_MATCH_THRESHOLD", 0.55))
@@ -491,7 +508,7 @@ async def attach_work_detail_matches(
         logger.info("STEP task matched (local) | id=%s | score=%.4f", task_match.get("id"), task_match["score"])
     else:
         tiebreaker_task: Optional[dict[str, Any]] = None
-        if llm_tiebreaker_enabled():
+        if llm_tiebreaker_allowed(top_task_score, task_threshold, task_candidates):
             logger.info(
                 "STEP task_tiebreaker -> LLM | top_score=%.4f < threshold=%.2f | candidates=%d",
                 top_task_score,
@@ -516,13 +533,17 @@ async def attach_work_detail_matches(
                     tree_name=config.display_name,
                 )
             if tiebreaker_task:
-                logger.info("STEP task_tiebreaker result=%s", tiebreaker_task)
+                logger.info(
+                    "STEP task_tiebreaker result | chosen_id=%s | confidence=%.4f | error=%s",
+                    tiebreaker_task.get("chosen_id"),
+                    float(tiebreaker_task.get("confidence") or 0.0),
+                    bool(tiebreaker_task.get("error")),
+                )
                 match_info.setdefault("llm_tiebreaker", {})["task"] = tiebreaker_task
                 if tiebreaker_task.get("error"):
                     match_info["warnings"].append(tiebreaker_task["error"])
         else:
-            if not llm_tiebreaker_enabled():
-                logger.info("STEP task_tiebreaker SKIPPED (LLM_MATCH_TIEBREAKER_ENABLED=false)")
+            logger.info("STEP task_tiebreaker SKIPPED (disabled or score outside configured gap)")
         task_confidence = float(tiebreaker_task.get("confidence", 0.0)) if tiebreaker_task and not tiebreaker_task.get("error") else 0.0
         if tiebreaker_task and not tiebreaker_task.get("error") and task_confidence >= llm_tiebreaker_confidence():
             chosen_task = next(
@@ -538,7 +559,9 @@ async def attach_work_detail_matches(
                 match_info.setdefault("llm_tiebreaker", {})["task"] = tiebreaker_task
                 logger.info("STEP task matched (LLM) | id=%s | confidence=%.4f", chosen_task.get("id"), task_confidence)
         if not match_info.get("task"):
-            logger.warning("STEP task NOT MATCHED | tiebreaker=%s", tiebreaker_task)
+            logger.warning(
+                "STEP task NOT MATCHED | tiebreaker_used=%s", bool(tiebreaker_task)
+            )
             if tiebreaker_task and not tiebreaker_task.get("error"):
                 match_info["warnings"].append("LLM tiebreaker did not confirm any task candidate.")
             elif task_candidates:
@@ -573,17 +596,28 @@ async def fetch_searchable_projects(api_key: str, project_tree: Optional[str] = 
     cache_key = f"{config.key}:searchable_projects"
     cached = get_cache(PROJECT_CACHE, cache_key)
     if cached is not None:
+        record_timing_event("project_cache_lookup", cache_hit=True, project_tree=config.key)
         return cached
 
-    projects = await fetch_paginated(api_key, "project/internal", {}, project_tree=config.key)
-    projects = [
-        project
-        for project in projects
-        if normalize_text(str(project.get("status") or "")) in SEARCHABLE_PROJECT_STATUSES
-        and project.get("is_active", True)
-    ]
-    set_cache(PROJECT_CACHE, cache_key, projects)
-    return projects
+    distributed, cache_state = await get_distributed_cache(cache_key)
+    if distributed is not None:
+        set_cache(PROJECT_CACHE, cache_key, distributed)
+        record_timing_event(
+            "project_cache_lookup",
+            cache_hit=True,
+            cache_layer="redis",
+            cache_state=cache_state,
+            project_tree=config.key,
+        )
+        if cache_state == "stale":
+            schedule_cache_refresh(
+                cache_key,
+                refresh_projects_cache(api_key, config.key, cache_key),
+            )
+        return distributed
+
+    record_timing_event("project_cache_lookup", cache_hit=False, project_tree=config.key)
+    return await refresh_projects_cache(api_key, config.key, cache_key)
 
 
 async def fetch_project_tasks(api_key: str, project_id: str, project_tree: Optional[str] = "agribank") -> list[dict[str, Any]]:
@@ -591,16 +625,73 @@ async def fetch_project_tasks(api_key: str, project_id: str, project_tree: Optio
     cache_key = f"{config.key}:tasks:{project_id}"
     cached = get_cache(TASK_CACHE, cache_key)
     if cached is not None:
+        record_timing_event("task_cache_lookup", cache_hit=True, project_tree=config.key)
         return cached
 
-    tasks = await fetch_paginated(api_key, "task/internal", {"project_id": project_id}, project_tree=config.key)
+    distributed, cache_state = await get_distributed_cache(cache_key)
+    if distributed is not None:
+        set_cache(TASK_CACHE, cache_key, distributed)
+        record_timing_event(
+            "task_cache_lookup",
+            cache_hit=True,
+            cache_layer="redis",
+            cache_state=cache_state,
+            project_tree=config.key,
+        )
+        if cache_state == "stale":
+            schedule_cache_refresh(
+                cache_key,
+                refresh_tasks_cache(api_key, project_id, config.key, cache_key),
+            )
+        return distributed
+
+    record_timing_event("task_cache_lookup", cache_hit=False, project_tree=config.key)
+    return await refresh_tasks_cache(api_key, project_id, config.key, cache_key)
+
+
+async def refresh_projects_cache(
+    api_key: str, project_tree: str, cache_key: str
+) -> list[dict[str, Any]]:
+    with timed_stage("project_api_fetch", project_tree=project_tree):
+        projects = await fetch_paginated(
+            api_key, "project/internal", {}, project_tree=project_tree
+        )
+    projects = [
+        project
+        for project in projects
+        if normalize_text(str(project.get("status") or "")) in SEARCHABLE_PROJECT_STATUSES
+        and project.get("is_active", True)
+    ]
+    set_cache(PROJECT_CACHE, cache_key, projects)
+    await set_distributed_cache(cache_key, projects)
+    return projects
+
+
+async def refresh_tasks_cache(
+    api_key: str, project_id: str, project_tree: str, cache_key: str
+) -> list[dict[str, Any]]:
+    with timed_stage("task_api_fetch", project_tree=project_tree):
+        tasks = await fetch_paginated(
+            api_key,
+            "task/internal",
+            {"project_id": project_id},
+            project_tree=project_tree,
+        )
     set_cache(TASK_CACHE, cache_key, tasks)
+    await set_distributed_cache(cache_key, tasks)
     return tasks
 
 
 def llm_tiebreaker_enabled() -> bool:
     raw = os.getenv("LLM_MATCH_TIEBREAKER_ENABLED", "true").strip().lower()
     return raw in {"1", "true", "yes", "y", "on"}
+
+
+def llm_tiebreaker_allowed(top_score: float, threshold: float, candidates: list[dict[str, Any]]) -> bool:
+    if not llm_tiebreaker_enabled() or not candidates or top_score <= 0:
+        return False
+    max_gap = env_float("LLM_MATCH_TIEBREAKER_MAX_GAP", 0.15)
+    return 0 < threshold - top_score <= max_gap
 
 
 def llm_tiebreaker_top_n() -> int:
@@ -668,7 +759,12 @@ async def call_llm_tiebreaker(prompt: str) -> tuple[Optional[dict[str, Any]], Op
         len(prompt),
     )
     try:
-        response = await extraction.call_llm_extraction(config, prompt)
+        timeout_seconds = env_float("LLM_MATCH_TIEBREAKER_TIMEOUT_SECONDS", 15.0)
+        with timed_stage("llm_tiebreaker_call", provider=config.get("provider")):
+            response = await asyncio.wait_for(
+                extraction.call_llm_extraction(config, prompt),
+                timeout=timeout_seconds,
+            )
         logger.info(
             "LLM tiebreaker OK | provider=%s | model=%s | response_keys=%s",
             config.get("provider"),
@@ -953,28 +1049,15 @@ def rank_tasks(
 
     sorted_results = sorted(results, key=lambda item: item["score"], reverse=True)
 
-    # Log top 10 task matches for debugging
-    logger.info("=" * 80)
-    logger.info("TOP 10 TASK MATCHES | queries=%s", queries)
-    logger.info("=" * 80)
-    for i, task in enumerate(sorted_results[:10], 1):
-        logger.info(
-            "Task #%d | score=%.4f | matched_query=%r | name=%r",
-            i,
-            task.get("score", 0),
-            task.get("matched_query", ""),
-            task.get("name", "")[:80],
-        )
-        breakdown = task.get("score_breakdown", {})
-        if breakdown:
+    if os.getenv("AGRIBANK_MATCH_DEBUG", "false").lower() == "true":
+        logger.info("TOP TASK MATCHES | query_count=%d", len(queries))
+        for index, task in enumerate(sorted_results[:10], 1):
             logger.info(
-                "  Breakdown: matched_tokens=%d | longest_seq=%d | query_cov=%.2f%% | cand_cov=%.2f%%",
-                breakdown.get("matched_tokens", 0),
-                breakdown.get("longest_sequence", 0),
-                breakdown.get("query_coverage", 0) * 100,
-                breakdown.get("candidate_coverage", 0) * 100,
+                "Task #%d | id=%s | score=%.4f",
+                index,
+                task.get("id"),
+                task.get("score", 0),
             )
-    logger.info("=" * 80)
 
     return sorted_results
 
@@ -1401,7 +1484,10 @@ def get_text_index(cache_key: str, normalized_candidates: list[str]) -> Optional
     digest = f"{cache_key}:{len(normalized_candidates)}:{hash(tuple(normalized_candidates))}"
     cached = get_cache(TEXT_INDEX_CACHE, digest)
     if cached is not None:
+        record_timing_event("ranking_index_cache_lookup", cache_hit=True)
         return cached
+
+    record_timing_event("ranking_index_cache_lookup", cache_hit=False)
 
     try:
         vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 5), lowercase=False)
@@ -1517,3 +1603,81 @@ def get_cache(cache: dict[str, tuple[float, list[dict[str, Any]]]], key: str) ->
 
 def set_cache(cache: dict[str, tuple[float, list[dict[str, Any]]]], key: str, value: list[dict[str, Any]]) -> None:
     cache[key] = (time.monotonic(), value)
+
+
+async def get_distributed_cache(
+    key: str,
+) -> tuple[Optional[list[dict[str, Any]]], str]:
+    client = distributed_cache_client()
+    if client is None:
+        return None, "miss"
+    try:
+        raw = await client.get(f"ner_ocr:cache:{key}")
+        if not raw:
+            return None, "miss"
+        payload = json.loads(raw)
+        value = payload.get("value") if isinstance(payload, dict) else None
+        if not isinstance(value, list):
+            return None, "miss"
+        age = max(0.0, time.time() - float(payload.get("created_at") or 0.0))
+        fresh_ttl = env_float("AGRIBANK_CACHE_TTL_SECONDS", 300.0)
+        return value, "fresh" if age <= fresh_ttl else "stale"
+    except Exception as exc:
+        logger.warning("Redis cache read failed: %s", type(exc).__name__)
+        return None, "error"
+
+
+async def set_distributed_cache(key: str, value: list[dict[str, Any]]) -> None:
+    client = distributed_cache_client()
+    if client is None:
+        return
+    stale_ttl = max(
+        int(env_float("AGRIBANK_CACHE_STALE_TTL_SECONDS", 1800.0)),
+        int(env_float("AGRIBANK_CACHE_TTL_SECONDS", 300.0)),
+    )
+    try:
+        await client.set(
+            f"ner_ocr:cache:{key}",
+            json.dumps(
+                {"created_at": time.time(), "value": value},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            ex=stale_ttl,
+        )
+    except Exception as exc:
+        logger.warning("Redis cache write failed: %s", type(exc).__name__)
+
+
+def distributed_cache_client() -> Any:
+    global _DISTRIBUTED_CACHE_CLIENT
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if not redis_url:
+        return None
+    if _DISTRIBUTED_CACHE_CLIENT is None:
+        try:
+            import redis.asyncio as redis
+        except ImportError:
+            logger.warning("redis>=5 is required for distributed matching cache")
+            return None
+        _DISTRIBUTED_CACHE_CLIENT = redis.from_url(redis_url, decode_responses=True)
+    return _DISTRIBUTED_CACHE_CLIENT
+
+
+def schedule_cache_refresh(key: str, coroutine: Any) -> None:
+    if key in _CACHE_REFRESH_KEYS:
+        coroutine.close()
+        return
+    _CACHE_REFRESH_KEYS.add(key)
+
+    async def run() -> None:
+        try:
+            await coroutine
+        except Exception as exc:
+            logger.warning("Stale cache refresh failed: %s", type(exc).__name__)
+        finally:
+            _CACHE_REFRESH_KEYS.discard(key)
+
+    task = asyncio.create_task(run())
+    _CACHE_REFRESH_TASKS.add(task)
+    task.add_done_callback(_CACHE_REFRESH_TASKS.discard)

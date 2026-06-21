@@ -127,3 +127,9 @@ celerybeat.pid
 # Backup files
 *.bak
 *.backup
+
+# Runtime artifacts
+dump.rdb
+/tmp/
+*.log
+.ruff_cache/

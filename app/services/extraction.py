@@ -11,6 +11,8 @@ from typing import Optional
 import httpx
 
 from app.services.ocr_cleaning import clean_ocr_plain_text
+from app.services.timing import record_timing_event
+from app.services.timing import timed_stage
 
 CONTRACT_FORMS = [
     "Hợp đồng trọn gói",
@@ -98,6 +100,14 @@ LLM_SYSTEM_INSTRUCTION = (
     "văn bản được tham chiếu, KHÔNG phải ngày ban hành văn bản hiện tại. "
     "Nếu không tìm thấy dòng 'địa danh, ngày ... tháng ... năm ...' dưới tiêu ngữ, "
     "để signed_or_effective_date = null thay vì lấy đại một ngày khác. "
+    "Ngoại lệ Giấy chứng nhận đăng ký doanh nghiệp/kinh doanh: document_number luôn null, "
+    "không lấy Mã số doanh nghiệp; ngày văn bản là ngày của 'Đăng ký thay đổi lần thứ' lớn nhất. "
+    "Với Báo cáo/Kế hoạch/Hồ sơ/Đề cương/Thuyết minh/Quy trình nội bộ, để ngày văn bản null. "
+    "QUY TẮC CƠ QUAN BAN HÀNH: Biên bản/Báo cáo/Hợp đồng/Kế hoạch/Quy trình/Hồ sơ thiết kế "
+    "nội bộ để issuer=null; không bao giờ lấy CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM. Với "
+    "Chứng chỉ/Giấy chứng nhận, chỉ lấy cơ quan nhà nước (Bộ/Cục/Sở/UBND/Tổng cục/Chi cục) "
+    "ở đầu tài liệu, không lấy tiêu đề hay 'Nơi cấp'. Với văn bản hành chính, lấy đủ mọi dòng "
+    "của khối cơ quan gần 'Số:', không dựa vào in đậm/in thường. "
     "QUY TẮC GIÁ TRỊ: trước hết xác định loại giấy tờ. Tờ trình/Văn bản đề nghị/"
     "Hồ sơ trình (Tờ trình, TTr, đề nghị, trình thẩm định, trình phê duyệt, xin chấp thuận) "
     "thì mọi tổng mức đầu tư/dự toán/kinh phí/giá trị đề nghị/giá tiền là submitted_value, "
@@ -109,6 +119,15 @@ LLM_SYSTEM_INSTRUCTION = (
     "trình/duyệt nếu không có ngữ cảnh duyệt thật rõ."
 )
 
+LLM_DELTA_SYSTEM_INSTRUCTION = (
+    "Trích xuất có căn cứ từ OCR tiếng Việt. Chỉ trả JSON theo response schema; "
+    "không suy diễn, thiếu thì null. Evidence tối đa 200 ký tự. Bỏ qua dấu đến, "
+    "con dấu và nhiễu OCR. Ngày hiển thị DD/MM/YYYY, normalized_value YYYY-MM-DD; "
+    "không lấy ngày trong phần Căn cứ hoặc văn bản được dẫn chiếu."
+)
+
+_GENAI_CLIENTS: dict[tuple[str, str], Any] = {}
+
 COMMON_EXTRACTION_RULES = (
     "Chỉ trả JSON hợp lệ, không markdown. Chỉ lấy thông tin có chứng cứ; thiếu thì để null. "
     "Bỏ qua stamp/overlay OCR như CÔNG VĂN ĐẾN, Số đến, Ngày đến, con dấu, mã số DN và mảnh chữ từ dấu."
@@ -116,12 +135,11 @@ COMMON_EXTRACTION_RULES = (
 
 DOCUMENT_FIELD_RULES = """
 Rules document:
-- document_number: số văn bản ở đầu tài liệu; giữ dạng đã chuẩn hóa như 5771/NHNo-QLĐT.
-- signed_or_effective_date: BẮT BUỘC lấy từ dòng "<Địa danh>, ngày DD tháng MM năm YYYY" hoặc "<Địa danh>, Ngày DD, tháng MM, năm YYYY" nằm NGAY DƯỚI tiêu ngữ "Độc lập - Tự do - Hạnh phúc" (góc phải/đầu văn bản). value=DD/MM/YYYY, normalized_value=YYYY-MM-DD. KHÔNG lấy ngày trong "Căn cứ ...", Luật/Nghị định/Thông tư/Quyết định số/Công văn số (đó là ngày của văn bản tham chiếu, không phải ngày ban hành). Nếu không tìm được dòng địa danh + ngày dưới tiêu ngữ thì để null.
-- approved_value: chỉ map sau khi xác định văn bản là QUYẾT ĐỊNH/văn bản phê duyệt/chấp thuận/đồng ý/cho phép, hoặc là HỢP ĐỒNG có giá trị hợp đồng đã ký. Không map duyệt chỉ vì trong TỜ TRÌNH có chữ phê duyệt.
-- submitted_value: chỉ map sau khi xác định văn bản là TỜ TRÌNH/Văn bản đề nghị/Hồ sơ trình. Với nhóm này, mọi tổng giá trị/giá tiền/giá gói thầu/tổng mức đầu tư/dự toán/kinh phí/giá trị đề nghị đều là submitted_value.
-- Biên lai/Phiếu thu/Chứng từ phí và văn bản góp ý/tham gia ý kiến/cung cấp thông tin/giấy mời/phân công: không map submitted_value; chỉ map approved_value nếu văn bản thể hiện nghiệp vụ duyệt/chấp thuận rất rõ, nếu không thì để null.
-- issuer: đơn vị phát hành góc trái đầu tài liệu, không lấy Kính gửi.
+- document_number: lấy "Số:" đầu tài liệu; Giấy ĐKDN/ĐKKD để null, KHÔNG lấy "Mã số doanh nghiệp".
+- signed_or_effective_date: lấy địa danh+ngày dưới "Độc lập - Tự do - Hạnh phúc", value=DD/MM/YYYY, normalized=YYYY-MM-DD; KHÔNG lấy ngày trong Căn cứ/Luật/Nghị định/Thông tư/Quyết định/Công văn. Giấy ĐKDN lấy ngày "Đăng ký thay đổi lần thứ" lớn nhất. Báo cáo/Kế hoạch/Hồ sơ/Đề cương/Thuyết minh/Quy trình nội bộ để null.
+- approved_value: Quyết định/phê duyệt/chấp thuận hoặc Hợp đồng; nếu bảng có "Tổng cộng" lấy số tiền tổng, không lấy dòng chi phí thành phần.
+- submitted_value: Tờ trình/đề nghị/hồ sơ trình; map tổng giá trị/giá gói thầu/tổng mức/dự toán/kinh phí/giá trị đề nghị. Biên lai/Phiếu thu/góp ý/giấy mời/phân công để null.
+- issuer: văn bản hành chính lấy đủ khối nhiều dòng gần "Số:". Biên bản/Báo cáo/Hợp đồng/Kế hoạch/Quy trình/Hồ sơ nội bộ để null. Chứng chỉ/Giấy chứng nhận chỉ lấy cơ quan nhà nước đầu tài liệu, không lấy tiêu đề, "Nơi cấp" hay "Cộng hòa...".
 - title: loại văn bản + dòng Về việc/V/v/trích yếu nếu có; bắt đầu bằng HỢP ĐỒNG/CÔNG VĂN/QUYẾT ĐỊNH/VĂN BẢN/TỜ TRÌNH/BIÊN BẢN/BÁO CÁO/THÔNG BÁO/ĐỀ NGHỊ.
 """.strip()
 
@@ -223,6 +241,7 @@ def normalize_result(
                 normalized_fields[key] = candidate
 
     if detected_type == "document":
+        apply_document_context_guardrails(normalized_fields, text, heuristic_fields)
         apply_document_intent_value_rules(normalized_fields, detected_intent)
 
     generic = payload.get("generic_extraction")
@@ -509,11 +528,15 @@ def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], lis
 
     approved_value = None
     if value_role == "approved":
-        approved_value = extract_labeled_money(
-            text,
-            [*MONEY_LABELS_APPROVED, *MONEY_LABELS_GENERAL_AMOUNT],
-            exclude_context_keywords=APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS,
-        )
+        approved_value = extract_labeled_money(text, MONEY_LABELS_DECISION_TOTAL)
+        if not approved_value:
+            approved_value = extract_labeled_money(
+                text,
+                MONEY_LABELS_APPROVED,
+                exclude_context_keywords=APPROVED_VALUE_EXCLUDE_CONTEXT_KEYWORDS,
+            )
+        if not approved_value:
+            approved_value = extract_labeled_money(text, MONEY_LABELS_GENERAL_AMOUNT)
     elif value_role == "contract_approved":
         approved_value = extract_labeled_money(text, CONTRACT_VALUE_LABELS)
     elif value_role == "receipt" and env_bool("MAP_RECEIPT_AMOUNT_TO_APPROVED", False):
@@ -530,7 +553,9 @@ def heuristic_document_fields(text: str) -> tuple[dict[str, dict[str, Any]], lis
 
     submitted_value = None
     if value_role == "submitted":
-        submitted_value = extract_labeled_money(text, [*MONEY_LABELS_SUBMITTED, *MONEY_LABELS_GENERAL_AMOUNT])
+        submitted_value = extract_labeled_money(text, MONEY_LABELS_SUBMITTED)
+        if not submitted_value:
+            submitted_value = extract_labeled_money(text, MONEY_LABELS_GENERAL_AMOUNT)
         if not submitted_value:
             submitted_value = extract_labeled_money(text, MONEY_LABELS_APPROVED)
     if submitted_value:
@@ -910,6 +935,48 @@ def looks_like_reference_date_field(field: dict[str, Any]) -> bool:
     return any(keyword in normalized for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS)
 
 
+def apply_document_context_guardrails(
+    fields: dict[str, dict[str, Any]],
+    text: str,
+    rule_fields: dict[str, dict[str, Any]],
+) -> None:
+    """Keep layout-sensitive fields deterministic after merging an LLM response."""
+    if is_business_registration_document(text):
+        fields["document_number"] = empty_field(DOCUMENT_FIELDS["document_number"])
+    elif rule_fields.get("document_number"):
+        fields["document_number"] = dict(rule_fields["document_number"])
+    elif not is_valid_document_number_field(fields.get("document_number"), text):
+        fields["document_number"] = empty_field(DOCUMENT_FIELDS["document_number"])
+
+    for key in ("signed_or_effective_date", "issuer"):
+        trusted = rule_fields.get(key)
+        fields[key] = dict(trusted) if trusted else empty_field(DOCUMENT_FIELDS[key])
+
+    approved = rule_fields.get("approved_value")
+    if approved and "tong cong" in normalize_for_rules(str(approved.get("evidence") or "")):
+        fields["approved_value"] = dict(approved)
+
+
+def is_valid_document_number_field(field: Any, text: str) -> bool:
+    if not isinstance(field, dict) or field.get("value") in (None, ""):
+        return False
+    candidate_text = " ".join(str(field.get(key) or "") for key in ("value", "evidence"))
+    normalized = normalize_for_rules(candidate_text)
+    if any(label in normalized for label in ("ma so doanh nghiep", "ma so thue", "so tai khoan")):
+        return False
+
+    header = "\n".join(meaningful_lines(text, limit=60))
+    normalized_value = normalize_document_number(field.get("normalized_value") or field.get("value"))
+    if not normalized_value:
+        return False
+    for line in meaningful_lines(header):
+        if not is_document_number_line(line):
+            continue
+        if normalized_value in (normalize_document_number(line) or ""):
+            return True
+    return False
+
+
 def apply_document_intent_value_rules(fields: dict[str, dict[str, Any]], document_intent: str) -> None:
     value_role = document_value_role(document_intent)
     if value_role == "submitted":
@@ -952,7 +1019,7 @@ def apply_document_intent_value_rules(fields: dict[str, dict[str, Any]], documen
 def extract_document_number(text: str) -> Optional[tuple[str, str]]:
     for line in meaningful_lines(text, limit=60):
         normalized_line = normalize_for_rules(line)
-        if not re.match(r"^(so|số)\b", normalized_line):
+        if not is_document_number_line(line):
             continue
         if any(skip in normalized_line for skip in ("tai khoan", "dien thoai", "cmnd", "cccd")):
             continue
@@ -966,6 +1033,10 @@ def extract_document_number(text: str) -> Optional[tuple[str, str]]:
         if re.search(r"\d", value):
             return normalize_document_number(value) or value, line
     return None
+
+
+def is_document_number_line(line: str) -> bool:
+    return bool(re.match(r"^\s*(?:số|so)\s*[:.]?\s*[A-Z0-9Đ]", line, flags=re.IGNORECASE))
 
 
 def normalize_document_number(value: Any) -> Optional[str]:
@@ -1079,7 +1150,118 @@ DATE_REFERENCE_CONTEXT_KEYWORDS = (
 )
 
 
+DATE_NOT_APPLICABLE_TITLE_PREFIXES = (
+    "bao cao",
+    "ke hoach",
+    "ho so",
+    "de cuong",
+    "thuyet minh",
+    "quy trinh",
+    "he thong qlcl",
+    "he thong quan ly chat luong",
+)
+
+ISSUER_NOT_APPLICABLE_TITLE_PREFIXES = (
+    "bien ban",
+    "bao cao",
+    "hop dong",
+    "ke hoach",
+    "quy trinh",
+    "ho so",
+    "de cuong",
+    "thuyet minh",
+    "he thong qlcl",
+    "he thong quan ly chat luong",
+)
+
+
+def is_business_registration_document(text: str) -> bool:
+    sample = normalize_for_rules("\n".join(meaningful_lines(text, limit=80)))
+    certificate_phrases = (
+        "giay chung nhan dang ky doanh nghiep",
+        "giay chung nhan dang ky kinh doanh",
+        "giay xac nhan dang ky kinh doanh",
+        "giay phep dang ky kinh doanh",
+        "giay phep dkkd",
+    )
+    return any(phrase in sample for phrase in certificate_phrases) or (
+        "ma so doanh nghiep" in sample and ("dang ky" in sample or "dkkd" in sample)
+    )
+
+
+def first_document_title_kind(text: str) -> Optional[str]:
+    prefixes = (
+        *ISSUER_NOT_APPLICABLE_TITLE_PREFIXES,
+        "chung chi",
+        "giay chung nhan",
+        "giay xac nhan",
+        "to trinh",
+        "quyet dinh",
+        "thong bao",
+        "cong van",
+        "giay moi",
+        "van ban",
+    )
+    for line in meaningful_lines(text, limit=90):
+        normalized = normalize_for_rules(line)
+        normalized = re.sub(r"^\d+[.)\s-]+", "", normalized)
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                return prefix
+    return None
+
+
+def is_date_not_applicable_document(text: str) -> bool:
+    kind = first_document_title_kind(text)
+    return bool(kind and kind.startswith(DATE_NOT_APPLICABLE_TITLE_PREFIXES))
+
+
+def is_issuer_not_applicable_document(text: str) -> bool:
+    kind = first_document_title_kind(text)
+    return bool(kind and kind.startswith(ISSUER_NOT_APPLICABLE_TITLE_PREFIXES))
+
+
+def extract_business_registration_date(text: str) -> Optional[tuple[str, Any, str, float]]:
+    change_pattern = re.compile(
+        r"((?:đăng|dang)\s+(?:ký|ky)\s+thay\s+(?:đổi|doi)\s+lần\s+(?:thứ|thu)\s*[:\-]?\s*(\d{1,3})"
+        r"[^\n]*(?:\n(?!\s*(?:đăng|dang)\s+(?:ký|ky)\s+thay\s+(?:đổi|doi))[^\n]*){0,2})",
+        flags=re.IGNORECASE,
+    )
+    candidates: list[tuple[int, int, str, str]] = []
+    for match in change_pattern.finditer(text):
+        block = clean_text(match.group(1))
+        date = extract_first_date(block)
+        if date:
+            candidates.append((int(match.group(2)), match.start(), date, block))
+
+    if candidates:
+        _change_number, _position, date, evidence = max(candidates, key=lambda item: (item[0], item[1]))
+        normalized = normalize_date(date)
+        display = format_display_date(normalized) if normalized else None
+        if normalized:
+            return display or date, normalized, evidence, 0.96
+
+    initial_pattern = re.search(
+        r"((?:đăng|dang)\s+(?:ký|ky)\s+lần\s+(?:đầu|dau)[^\n]{0,160})",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if initial_pattern:
+        evidence = clean_text(initial_pattern.group(1))
+        date = extract_first_date(evidence)
+        normalized = normalize_date(date) if date else None
+        display = format_display_date(normalized) if normalized else None
+        if normalized:
+            return display or date, normalized, evidence, 0.88
+    return None
+
+
 def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str, float]]:
+    if is_business_registration_document(text):
+        return extract_business_registration_date(text)
+    if is_date_not_applicable_document(text):
+        return None
+
     # Priority 1: Date under the national motto ("Độc lập - Tự do - Hạnh phúc")
     # in the form "<địa danh>, ngày DD tháng MM năm YYYY". The location prefix
     # with a comma is REQUIRED to avoid matching legal references like
@@ -1196,6 +1378,13 @@ MONEY_LABELS_GENERAL_AMOUNT = [
     "số tiền",
 ]
 
+MONEY_LABELS_DECISION_TOTAL = [
+    "tổng giá trị phần công việc",
+    "tổng giá trị các gói thầu",
+    "tổng giá các gói thầu",
+    "tổng cộng",
+]
+
 MONEY_LABELS_SUBMITTED = [
     "giá trị trình",
     "giá trị đề nghị",
@@ -1232,8 +1421,12 @@ TOTAL_INVESTMENT_LABELS = {
     "kinh phi thuc hien",
     "nguon von dau tu",
     "tong gia tri",
+    "tong gia tri phan cong viec",
+    "tong gia tri cac goi thau",
+    "tong gia cac goi thau",
     "tong gia tien",
     "tong so tien",
+    "tong cong",
 }
 
 CONTRACT_ESTIMATED_VALUE_LABELS = [
@@ -1604,44 +1797,117 @@ def extract_labeled_date(text: str, labels: list[str]) -> Optional[tuple[str, An
 
 
 def extract_issuer(text: str) -> Optional[tuple[str, str]]:
-    lines = meaningful_lines(text, limit=35)
+    if is_issuer_not_applicable_document(text):
+        return None
+
+    lines = meaningful_lines(text, limit=45)
     if not lines:
         return None
 
-    stop_index = len(lines)
+    if is_certificate_document(text):
+        issuer_lines = extract_certificate_issuer_lines(lines)
+    else:
+        issuer_lines = extract_administrative_issuer_lines(lines)
+    if not issuer_lines:
+        return None
+
+    issuer = clean_text(" ".join(issuer_lines))
+    return issuer, "\n".join(issuer_lines)
+
+
+def is_certificate_document(text: str) -> bool:
+    kind = first_document_title_kind(text)
+    return kind in {"chung chi", "giay chung nhan", "giay xac nhan"}
+
+
+def extract_certificate_issuer_lines(lines: list[str]) -> list[str]:
+    title_index = len(lines)
     for index, line in enumerate(lines):
         normalized = normalize_for_rules(line)
-        if normalized.startswith(("cong hoa", "doc lap")) or "to trinh" in normalized or "quyet dinh" in normalized:
-            stop_index = min(stop_index, index)
-        if re.match(r"^(so|số)\b", normalized):
-            stop_index = min(stop_index, index)
+        if normalized.startswith(("chung chi", "giay chung nhan", "giay xac nhan")):
+            title_index = index
             break
 
     candidates: list[str] = []
-    for line in lines[: max(stop_index, 1)]:
-        normalized = normalize_for_rules(line)
-        if not line or len(line) < 3:
+    for line in lines[:title_index]:
+        if issuer_line_is_excluded(line):
             continue
-        if normalized.startswith(("cong hoa", "doc lap", "so ", "so:", "ngay ")):
-            continue
-        if is_probable_issuer_line(line):
+        if is_government_authority_line(line):
             candidates.append(line)
-        if len(candidates) >= 4:
+    return candidates[:5]
+
+
+def extract_administrative_issuer_lines(lines: list[str]) -> list[str]:
+    number_index: Optional[int] = None
+    for index, line in enumerate(lines):
+        if is_document_number_line(line):
+            number_index = index
             break
 
-    if not candidates:
-        for line in lines[:12]:
-            if is_probable_issuer_line(line):
-                candidates.append(line)
-                if len(candidates) >= 3:
-                    break
+    if number_index is not None:
+        header_lines = lines[max(0, number_index - 7) : number_index]
+    else:
+        stop_index = len(lines)
+        for index, line in enumerate(lines):
+            normalized = normalize_for_rules(line)
+            if normalized.startswith(("cong hoa", "doc lap")) or first_document_title_kind(line):
+                stop_index = index
+                break
+        header_lines = lines[:stop_index]
 
-    if not candidates:
-        return None
+    eligible = [line for line in header_lines if not issuer_line_is_excluded(line)]
+    anchor_indexes = [index for index, line in enumerate(eligible) if is_probable_issuer_line(line)]
+    if not anchor_indexes:
+        return []
 
-    issuer_lines = candidates[:4]
-    issuer = clean_text(" ".join(issuer_lines))
-    return issuer, " / ".join(issuer_lines)
+    start = anchor_indexes[0]
+    end = anchor_indexes[-1]
+    issuer_lines = eligible[start : end + 1]
+    return issuer_lines[-6:]
+
+
+def issuer_line_is_excluded(line: str) -> bool:
+    normalized = normalize_for_rules(line)
+    if not normalized or len(normalized) < 3:
+        return True
+    if is_document_number_line(line):
+        return True
+    excluded_prefixes = (
+        "cong hoa xa hoi chu nghia",
+        "doc lap",
+        "socialist republic",
+        "ngay ",
+        "kinh gui",
+        "noi cap",
+        "noi nhan",
+        "to trinh",
+        "quyet dinh",
+        "thong bao",
+        "cong van",
+        "giay moi",
+        "van ban",
+        "bien ban",
+        "bao cao",
+        "hop dong",
+        "ke hoach",
+        "quy trinh",
+        "ho so",
+        "de cuong",
+        "thuyet minh",
+        "chung chi",
+        "giay chung nhan",
+        "giay xac nhan",
+    )
+    return normalized.startswith(excluded_prefixes)
+
+
+def is_government_authority_line(line: str) -> bool:
+    normalized = normalize_for_rules(line)
+    return bool(
+        re.search(r"(?:^|\s)(?:bo|cuc|so|ubnd|tong cuc|chi cuc)(?:\s|$)", normalized)
+        or "uy ban nhan dan" in normalized
+        or "phong dang ky kinh doanh" in normalized
+    )
 
 
 def extract_document_title(text: str) -> Optional[str]:
@@ -1817,6 +2083,8 @@ def find_first_money(text: str) -> Optional[tuple[str, Any]]:
             continue
         if looks_like_non_money_number(text, match, value):
             continue
+        if looks_like_unit_hint(text, match, value):
+            continue
         normalized = normalize_money(value)
         if normalized is not None:
             return value, normalized
@@ -1840,6 +2108,8 @@ def find_largest_money_with_offset(text: str) -> Optional[tuple[str, Any, int]]:
         if not re.search(r"\d", value):
             continue
         if looks_like_non_money_number(text, match, value):
+            continue
+        if looks_like_unit_hint(text, match, value):
             continue
         normalized = normalize_money(value)
         if isinstance(normalized, int) and normalized > best_value:
@@ -1867,6 +2137,33 @@ def looks_like_non_money_number(text: str, match: re.Match, value: str) -> bool:
         return True
 
     return True
+
+
+# Column headers in Vietnamese tables often annotate a money column with the
+# unit it uses, e.g. "Giá gói thầu (1.000 đồng)" or "Giá trị (triệu đồng)".
+# Those parenthesised hints must NOT be treated as the actual approved amount.
+_UNIT_HINT_VALUES = {1000, 1_000_000, 1_000_000_000}
+
+
+def looks_like_unit_hint(text: str, match: re.Match, value: str) -> bool:
+    """Return True when the matched money is just a column-unit annotation."""
+    start, end = match.start(), match.end()
+    before = text[max(0, start - 40) : start]
+    after = text[end : end + 8]
+    # Only consider candidates directly inside parentheses.
+    if ")" not in after:
+        return False
+    last_open = before.rfind("(")
+    last_close = before.rfind(")")
+    if last_open <= last_close:
+        return False
+    # Anything other than whitespace / common label words between '(' and the
+    # number means it's likely a real amount (e.g. "(Bằng chữ: 193 tỷ đồng)").
+    in_paren = before[last_open + 1 :]
+    if re.search(r"[A-Za-zÀ-ỹ]", in_paren):
+        return False
+    normalized = normalize_money(value)
+    return isinstance(normalized, int) and normalized in _UNIT_HINT_VALUES
 
 
 def normalize_money(value: str) -> Optional[int]:
@@ -2059,30 +2356,81 @@ async def extract_information(
     text: str,
     extraction_type: Optional[str] = DEFAULT_EXTRACTION_TYPE,
 ) -> dict[str, Any]:
-    text = clean_ocr_text(text)
+    with timed_stage("extraction_clean_text"):
+        text = clean_ocr_text(text)
     extraction_type = normalize_extraction_type(extraction_type)
     llm_config = get_llm_config()
     local_enabled = env_bool("LOCAL_EXTRACTION_ENABLED", True)
     entity_extraction_enabled = env_bool("LLM_ENTITY_EXTRACTION_ENABLED", True)
+    execution_mode = llm_execution_mode()
 
-    # Priority 1: Try LLM first if available
-    if llm_config:
-        # Optionally run local parser for entity extraction prompt or validation
-        local_data = None
-        if local_enabled and entity_extraction_enabled:
+    local_data = None
+    if local_enabled:
+        with timed_stage("rule_parse", extraction_type=extraction_type):
             local_data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
 
-        # Build prompt (with or without local context)
-        if entity_extraction_enabled and local_data:
-            prompt = build_entity_extraction_prompt(text, local_data)
-            llm_mode = "entity_extraction"
+    should_call_llm = False
+    decision_reason = "llm_config_unavailable"
+    if llm_config and execution_mode == "always":
+        should_call_llm = True
+        decision_reason = "mode_always"
+    elif llm_config and execution_mode == "adaptive":
+        if local_data is None:
+            should_call_llm = True
+            decision_reason = "local_parser_disabled"
         else:
-            prompt = build_prompt(text, extraction_type=extraction_type)
-            llm_mode = "direct"
+            should_call_llm, decision_reason = adaptive_llm_decision(local_data, text, extraction_type)
+    elif execution_mode == "off":
+        decision_reason = "mode_off"
+
+    record_timing_event(
+        "llm_decision",
+        mode=execution_mode,
+        call_llm=should_call_llm,
+        reason=decision_reason,
+    )
+
+    if should_call_llm and llm_config:
+        with timed_stage("llm_prompt_build"):
+            if entity_extraction_enabled and local_data:
+                requested_fields = requested_llm_fields(local_data, extraction_type)
+                prompt = build_entity_extraction_prompt(
+                    text, local_data, requested_fields=requested_fields
+                )
+                llm_mode = "entity_extraction"
+            else:
+                requested_fields = list(
+                    (CONTRACT_FIELDS if extraction_type == "contract" else DOCUMENT_FIELDS).keys()
+                )
+                prompt = build_prompt(text, extraction_type=extraction_type)
+                llm_mode = "direct"
+            llm_config = {
+                **llm_config,
+                "response_schema": build_llm_response_schema(
+                    extraction_type, requested_fields
+                ),
+                "max_output_tokens": (
+                    int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_CONTRACT", "3072"))
+                    if extraction_type == "contract"
+                    else int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS_DOCUMENT", "1536"))
+                ),
+                "system_instruction": (
+                    LLM_DELTA_SYSTEM_INSTRUCTION
+                    if os.getenv("LLM_PROMPT_MODE", "delta").lower() == "delta"
+                    else LLM_SYSTEM_INSTRUCTION
+                ),
+            }
 
         try:
-            parsed = await call_llm_extraction(llm_config, prompt)
-            data = normalize_result(parsed, text, payload_source="llm", extraction_type=extraction_type)
+            with timed_stage(
+                "llm_call",
+                provider=llm_config.get("provider"),
+                model=llm_config.get("model"),
+                prompt_chars=len(prompt),
+            ):
+                parsed = await call_llm_extraction(llm_config, prompt)
+            with timed_stage("llm_result_normalize"):
+                data = normalize_result(parsed, text, payload_source="llm", extraction_type=extraction_type)
             data["pipeline"] = "local_with_llm_fallback" if llm_mode == "entity_extraction" else "llm"
             data["llm_extraction_mode"] = llm_mode
             data["llm_fallback_used"] = True
@@ -2096,41 +2444,26 @@ async def extract_information(
                 "data": data,
             }
         except Exception as exc:
-            # LLM failed, fallback to local if enabled
-            if local_enabled:
-                if local_data is None:
-                    local_data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
+            if local_data is not None:
                 local_data["pipeline"] = "local"
                 local_data["llm_fallback_error"] = compact_error(exc)
                 local_data["needs_review"] = True
-                return {
-                    "provider": "local",
-                    "model": None,
-                    "data": local_data,
-                }
-            else:
-                # No local fallback, return error
-                data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
-                data["pipeline"] = "llm_failed_no_fallback"
-                data["llm_error"] = compact_error(exc)
-                data["needs_review"] = True
-                return {
-                    "provider": "error",
-                    "model": None,
-                    "data": data,
-                }
+                return {"provider": "local", "model": None, "data": local_data}
 
-    # Priority 2: No LLM available, use local parser
-    if local_enabled:
-        data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
-        data["pipeline"] = "local"
+            data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
+            data["pipeline"] = "llm_failed_no_fallback"
+            data["llm_error"] = compact_error(exc)
+            data["needs_review"] = True
+            return {"provider": "error", "model": None, "data": data}
+
+    if local_data is not None:
+        local_data["pipeline"] = "local"
         return {
             "provider": "local",
             "model": None,
-            "data": data,
+            "data": local_data,
         }
 
-    # No LLM and no local enabled - return empty
     data = normalize_result({}, text, payload_source="rule", extraction_type=extraction_type)
     data["pipeline"] = "no_extraction_available"
     data["needs_review"] = True
@@ -2139,6 +2472,96 @@ async def extract_information(
         "model": None,
         "data": data,
     }
+
+
+def llm_execution_mode() -> str:
+    legacy_fallback = os.getenv("LLM_FALLBACK_ENABLED")
+    if legacy_fallback is not None and not env_bool("LLM_FALLBACK_ENABLED", True):
+        return "off"
+
+    explicit = os.getenv("LLM_EXECUTION_MODE")
+    if explicit:
+        mode = explicit.strip().lower()
+        if mode in {"always", "adaptive", "off"}:
+            return mode
+
+    return "adaptive"
+
+
+def adaptive_llm_decision(
+    local_data: dict[str, Any],
+    text: str,
+    extraction_type: str,
+) -> tuple[bool, str]:
+    fields = local_data.get("fields") if isinstance(local_data.get("fields"), dict) else {}
+    threshold = env_float("LLM_ADAPTIVE_CONFIDENCE_THRESHOLD", 0.72)
+
+    if extraction_type == "contract":
+        core_fields = ("contract_name", "contract_number", "signed_date", "contract_value", "contractor_name")
+        present = [
+            fields[key]
+            for key in core_fields
+            if isinstance(fields.get(key), dict) and fields[key].get("value") not in (None, "")
+        ]
+        if len(present) < 4:
+            return True, f"contract_core_fields_{len(present)}_of_5"
+        average_confidence = sum(safe_float(field.get("confidence")) for field in present) / len(present)
+        if average_confidence < threshold:
+            return True, "contract_core_confidence_low"
+        return False, "contract_core_fields_sufficient"
+
+    kind = first_document_title_kind(text)
+    if not kind:
+        title_field = fields.get("title") if isinstance(fields.get("title"), dict) else {}
+        extracted_title = str(title_field.get("value") or "").strip()
+        if extracted_title:
+            kind = first_document_title_kind(extracted_title)
+    internal_document = bool(kind and kind.startswith(ISSUER_NOT_APPLICABLE_TITLE_PREFIXES))
+    business_registration = is_business_registration_document(text)
+    expected_fields: list[str] = []
+
+    if not kind:
+        expected_fields.append("title")
+    if not internal_document and not business_registration:
+        expected_fields.extend(("document_number", "signed_or_effective_date", "issuer"))
+    elif business_registration and not internal_document:
+        expected_fields.extend(("signed_or_effective_date", "issuer"))
+
+    missing = [
+        key
+        for key in expected_fields
+        if not isinstance(fields.get(key), dict) or fields[key].get("value") in (None, "")
+    ]
+    if missing:
+        return True, f"missing_{'_'.join(missing)}"
+
+    present = [fields[key] for key in expected_fields if isinstance(fields.get(key), dict)]
+    if present:
+        average_confidence = sum(safe_float(field.get("confidence")) for field in present) / len(present)
+        if average_confidence < threshold:
+            return True, "document_required_confidence_low"
+
+    value_role = document_value_role(str(local_data.get("document_intent") or "unknown"))
+    value_key = "submitted_value" if value_role == "submitted" else "approved_value" if value_role in {"approved", "contract_approved"} else None
+    if value_key and document_contains_money_signal(text):
+        field = fields.get(value_key) if isinstance(fields.get(value_key), dict) else {}
+        if field.get("value") in (None, ""):
+            return True, f"missing_{value_key}"
+
+    return False, "local_fields_sufficient"
+
+
+def document_contains_money_signal(text: str) -> bool:
+    normalized = normalize_for_rules(text[:20000])
+    labels = (
+        "gia tri",
+        "gia goi thau",
+        "tong muc dau tu",
+        "du toan",
+        "tong kinh phi",
+        "tong cong",
+    )
+    return any(label in normalized for label in labels) and bool(MONEY_PATTERN.search(text[:20000]))
 
 
 def get_llm_config() -> Optional[dict[str, Any]]:
@@ -2162,7 +2585,7 @@ def get_llm_config() -> Optional[dict[str, Any]]:
         or os.getenv("GOOGLE_AI_PROJECT_ID")
         or os.getenv("GOOGLE_CLOUD_PROJECT")
     )
-    location = os.getenv("GEMINI_VERTEX_LOCATION") or os.getenv("VERTEX_AI_LOCATION") or "us-central1"
+    location = os.getenv("GEMINI_VERTEX_LOCATION") or os.getenv("VERTEX_AI_LOCATION") or "global"
     has_google_credentials = bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or os.getenv("GOOGLE_CLOUD_PROJECT"))
     if project_id and has_google_credentials:
         return {
@@ -2193,41 +2616,51 @@ async def call_gemini_api_key_extraction(config: dict[str, Any], prompt: str) ->
                 "Content-Type": "application/json",
                 "x-goog-api-key": config["api_key"],
             },
-            json=build_gemini_payload(prompt),
+            json=build_gemini_payload(prompt, config),
         )
         response.raise_for_status()
     return parse_gemini_response(response.json())
 
 
 async def call_vertex_gemini_extraction(config: dict[str, Any], prompt: str) -> dict[str, Any]:
-    """Call Vertex AI Gemini using new Google GenAI SDK for enterprise models like gemini-3.5-flash"""
+    """Call Vertex Gemini through a reusable async GenAI client."""
     try:
         from google import genai
         from google.genai import types
 
-        # Use enterprise SDK for newer models
-        def _call_genai():
+        key = (str(config["project_id"]), str(config["location"]))
+        client = _GENAI_CLIENTS.get(key)
+        if client is None:
             client = genai.Client(
                 vertexai=True,
                 project=config["project_id"],
-                location=config["location"]
+                location=config["location"],
             )
+            _GENAI_CLIENTS[key] = client
 
-            response = client.models.generate_content(
+        response = await asyncio.wait_for(
+            client.aio.models.generate_content(
                 model=config["model"],
                 contents=[prompt],
-                config=types.GenerateContentConfig(**build_vertex_generation_config_kwargs(types)),
-            )
-            return response.text
-
-        response_text = await asyncio.to_thread(_call_genai)
-        return json.loads(response_text)
+                config=types.GenerateContentConfig(
+                    **build_vertex_generation_config_kwargs(types, config)
+                ),
+            ),
+            timeout=env_float("GEMINI_TIMEOUT_SECONDS", 90.0),
+        )
+        response_text = response if isinstance(response, str) else response.text
+        return parse_json_content(str(response_text or ""))
 
     except ImportError:
         # Fallback to old REST API if google-genai not installed
         access_token = await asyncio.to_thread(get_google_access_token)
         model_path = vertex_model_path(config["project_id"], config["location"], config["model"])
-        url = f"https://{config['location']}-aiplatform.googleapis.com/v1/{model_path}:generateContent"
+        hostname = (
+            "aiplatform.googleapis.com"
+            if config["location"] == "global"
+            else f"{config['location']}-aiplatform.googleapis.com"
+        )
+        url = f"https://{hostname}/v1/{model_path}:generateContent"
         async with httpx.AsyncClient(timeout=env_float("GEMINI_TIMEOUT_SECONDS", 90.0)) as client:
             response = await client.post(
                 url,
@@ -2235,18 +2668,24 @@ async def call_vertex_gemini_extraction(config: dict[str, Any], prompt: str) -> 
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
                 },
-                json=build_gemini_payload(prompt),
+                json=build_gemini_payload(prompt, config),
             )
             response.raise_for_status()
         return parse_gemini_response(response.json())
 
 
-def build_vertex_generation_config_kwargs(types: Any) -> dict[str, Any]:
+def build_vertex_generation_config_kwargs(
+    types: Any, config: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    config = config or {}
     generation_config_kwargs = {
-        "system_instruction": LLM_SYSTEM_INSTRUCTION,
+        "system_instruction": config.get("system_instruction") or LLM_DELTA_SYSTEM_INSTRUCTION,
         "temperature": 0,
         "response_mime_type": "application/json",
+        "max_output_tokens": int(config.get("max_output_tokens") or 1536),
     }
+    if isinstance(config.get("response_schema"), dict):
+        generation_config_kwargs["response_schema"] = config["response_schema"]
     # Disable internal "thinking" on Gemini 2.5 family to reduce latency.
     thinking_budget = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
     try:
@@ -2258,17 +2697,30 @@ def build_vertex_generation_config_kwargs(types: Any) -> dict[str, Any]:
     return generation_config_kwargs
 
 
-def build_gemini_payload(prompt: str) -> dict[str, Any]:
+def build_gemini_payload(
+    prompt: str, config: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    config = config or {}
     generation_config: dict[str, Any] = {
         "temperature": 0,
         "responseMimeType": "application/json",
+        "maxOutputTokens": int(config.get("max_output_tokens") or 1536),
     }
     # Disable "thinking" on Gemini 2.5 family for faster latency.
     thinking_budget = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
     generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+    if isinstance(config.get("response_schema"), dict):
+        generation_config["responseSchema"] = config["response_schema"]
 
     return {
-        "systemInstruction": {"parts": [{"text": LLM_SYSTEM_INSTRUCTION}]},
+        "systemInstruction": {
+            "parts": [
+                {
+                    "text": config.get("system_instruction")
+                    or LLM_DELTA_SYSTEM_INSTRUCTION
+                }
+            ]
+        },
         "contents": [
             {
                 "role": "user",
@@ -2391,50 +2843,161 @@ def compact_prompt_fields(fields: dict[str, Any]) -> dict[str, Any]:
         if value in (None, "") and normalized_value in (None, "") and evidence in (None, "") and confidence <= 0:
             continue
         compact[key] = {
-            "v": value,
-            "n": normalized_value,
-            "e": evidence,
+            "v": _prompt_value(value, 500),
+            "n": _prompt_value(normalized_value, 300),
+            "e": _prompt_value(evidence, 200),
             "c": field.get("confidence"),
         }
     return compact
 
 
-def build_entity_extraction_prompt(text: str, local_data: dict[str, Any]) -> str:
+def _prompt_value(value: Any, limit: int) -> Any:
+    return value[:limit] if isinstance(value, str) else value
+
+
+def requested_llm_fields(local_data: dict[str, Any], extraction_type: str) -> list[str]:
+    schema = CONTRACT_FIELDS if extraction_type == "contract" else DOCUMENT_FIELDS
+    fields = local_data.get("fields") if isinstance(local_data.get("fields"), dict) else {}
+    threshold = env_float("LLM_ADAPTIVE_CONFIDENCE_THRESHOLD", 0.72)
+    requested = []
+    for key in schema:
+        field = fields.get(key) if isinstance(fields.get(key), dict) else {}
+        if field.get("value") in (None, "") or safe_float(field.get("confidence")) < threshold:
+            requested.append(key)
+    return requested or list(schema)
+
+
+def build_llm_response_schema(
+    extraction_type: str, requested_fields: list[str]
+) -> dict[str, Any]:
+    field_object = {
+        "type": "OBJECT",
+        "properties": {
+            "value": {"type": "STRING", "nullable": True},
+            "normalized_value": {"type": "STRING", "nullable": True},
+            "evidence": {"type": "STRING", "nullable": True},
+            "confidence": {"type": "NUMBER"},
+        },
+    }
+    generic_names = (
+        (
+            "document_title_or_type",
+            "project_name_candidates",
+            "task_title_candidates",
+            "work_item_candidates",
+            "procurement_package_candidates",
+            "task_keywords",
+            "dates",
+            "monetary_amounts",
+            "document_numbers",
+        )
+        if extraction_type == "document"
+        else (
+            "document_title_or_type",
+            "task_title_candidates",
+            "work_item_candidates",
+            "contract_parties",
+            "monetary_amounts",
+            "dates",
+            "document_numbers",
+            "guarantee_terms",
+        )
+    )
+    generic_properties = {
+        name: {"type": "ARRAY", "items": {"type": "STRING"}}
+        for name in generic_names
+    }
+    generic_properties["document_title_or_type"] = {
+        "type": "STRING",
+        "nullable": True,
+    }
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "document_type": {"type": "STRING"},
+            "document_intent": {"type": "STRING"},
+            "fields": {
+                "type": "OBJECT",
+                "properties": {key: field_object for key in requested_fields},
+            },
+            "generic_extraction": {
+                "type": "OBJECT",
+                "properties": generic_properties,
+            },
+            "notes": {"type": "ARRAY", "items": {"type": "STRING"}},
+        },
+    }
+
+
+def build_entity_extraction_prompt(
+    text: str,
+    local_data: dict[str, Any],
+    requested_fields: Optional[list[str]] = None,
+) -> str:
     fields = local_data.get("fields") if isinstance(local_data.get("fields"), dict) else {}
     compact_fields = compact_prompt_fields(fields)
     if local_data.get("screen") == "contract":
-        return build_contract_entity_extraction_prompt(text, local_data, compact_fields)
+        requested_fields = requested_fields or requested_llm_fields(local_data, "contract")
+        return build_contract_entity_extraction_prompt(
+            text, local_data, compact_fields, requested_fields
+        )
 
-    trimmed_text = select_entity_extraction_text(text)
+    requested_fields = requested_fields or requested_llm_fields(local_data, "document")
+    trimmed_text = select_entity_extraction_text(text, "document")
     return f"""
 Trích xuất document từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
+Fields cần bổ sung/kiểm tra: {compact_json(requested_fields)}
 Local fields gợi ý: {compact_json(compact_fields)}
 {DOCUMENT_FIELD_RULES}
 {FIELD_OBJECT_HINT}
-{DOCUMENT_SCHEMA_HINT}
 Entity hints: project_name_candidates, task_title_candidates, work_item_candidates, procurement_package_candidates, task_keywords, monetary_entities.
 OCR:
 \"\"\"{trimmed_text}\"\"\"
 """.strip()
 
 
-def build_contract_entity_extraction_prompt(text: str, local_data: dict[str, Any], compact_fields: dict[str, Any]) -> str:
-    trimmed_text = select_entity_extraction_text(text)
+def build_contract_entity_extraction_prompt(
+    text: str,
+    local_data: dict[str, Any],
+    compact_fields: dict[str, Any],
+    requested_fields: Optional[list[str]] = None,
+) -> str:
+    requested_fields = requested_fields or requested_llm_fields(local_data, "contract")
+    trimmed_text = select_entity_extraction_text(text, "contract")
     return f"""
 Trích xuất hợp đồng từ OCR tiếng Việt. {COMMON_EXTRACTION_RULES}
 {CONTRACT_FIELD_RULES}
 contract_forms={compact_json(CONTRACT_FORMS)}
 contractor_groups={compact_json(CONTRACTOR_GROUPS)}
+Fields cần bổ sung/kiểm tra: {compact_json(requested_fields)}
 Local fields gợi ý: {compact_json(compact_fields)}
 {FIELD_OBJECT_HINT}
-{CONTRACT_SCHEMA_HINT}
 OCR:
 \"\"\"{trimmed_text}\"\"\"
 """.strip()
 
 
-def select_entity_extraction_text(text: str) -> str:
-    max_chars = int(os.getenv("LLM_ENTITY_MAX_CHARS", os.getenv("LLM_MAX_OCR_CHARS", "18000")))
+def select_entity_extraction_text(text: str, extraction_type: str = "document") -> str:
+    default_limit = 10000 if extraction_type == "contract" else 5000
+    specific_limit = int(
+        os.getenv(
+            "LLM_CONTRACT_MAX_OCR_CHARS"
+            if extraction_type == "contract"
+            else "LLM_DOCUMENT_MAX_OCR_CHARS",
+            str(default_limit),
+        )
+    )
+    configured_limit = os.getenv("LLM_ENTITY_MAX_CHARS")
+    if configured_limit:
+        # Legacy deployments often set this to 30k. Delta mode must still honor
+        # the smaller per-document latency budget.
+        max_chars = (
+            min(int(configured_limit), specific_limit)
+            if os.getenv("LLM_PROMPT_MODE", "delta").lower() == "delta"
+            else int(configured_limit)
+        )
+    else:
+        max_chars = specific_limit
     lines = non_boilerplate_lines(text, limit=900)
     if not lines:
         return text[:max_chars]
