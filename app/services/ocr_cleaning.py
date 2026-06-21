@@ -225,7 +225,30 @@ def normalize_ocr_chars(text: str) -> str:
         text = text.replace(source, target)
     text = normalize_ocr_date_artifacts(text)
     text = normalize_ocr_document_number_artifacts(text)
+    text = normalize_ocr_document_number_glyphs(text)
     return text
+
+
+def normalize_ocr_document_number_glyphs(text: str) -> str:
+    """Repair handwriting glyphs misread inside Vietnamese document numbers.
+
+    The serial part of "Số: NNN/<UPPERCASE>-<ISSUER>" is always pure digits, so
+    any non-digit appearing there is an OCR artifact from handwriting.
+    Vision frequently misreads handwritten "6" as "%" (e.g. "100%/QĐ-BQLDA"
+    instead of "1006/QĐ-BQLDA") — restrict the rewrite to that exact context to
+    avoid touching legitimate percentage expressions like "10%/năm".
+    """
+
+    def _fix(match: re.Match) -> str:
+        prefix = match.group(1)
+        if "%" not in prefix or not any(ch.isdigit() for ch in prefix):
+            return match.group(0)
+        return prefix.replace("%", "6") + match.group(2)
+
+    # Prefix starts with a digit, has 1–7 trailing digits/percent signs, and is
+    # immediately followed by "/<UPPERCASE>" which is the canonical doc-number
+    # separator in Vietnamese administrative documents (QĐ, TT, NĐ, CV, HĐ, …).
+    return re.sub(r"\b(\d[\d%]{0,7})(/[A-Z\u00c0-\u1ef9])", _fix, text)
 
 
 def normalize_ocr_document_number_artifacts(text: str) -> str:
