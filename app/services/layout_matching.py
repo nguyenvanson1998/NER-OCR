@@ -197,47 +197,70 @@ def find_best_segment_group(
     used_segment_ids: set[str],
     match_index: Optional[SegmentMatchIndex] = None,
 ) -> Optional[tuple[list[dict[str, Any]], float]]:
-    candidates = [field.get("evidence"), field.get("value"), field.get("normalized_value")]
-    candidate_texts = [str(candidate) for candidate in candidates if candidate not in (None, "")]
-    if not candidate_texts:
+    # Prefer matching against `evidence` (verbatim OCR snippet). Normalized
+    # values like "21/11/2025" or "2025-11-21" can collide with unrelated
+    # segments that happen to repeat the same digits elsewhere in the document,
+    # so use them only as a fallback when the evidence yields no confident hit.
+    primary_text = field.get("evidence")
+    fallback_texts = [field.get("value"), field.get("normalized_value")]
+
+    def _to_str_list(values: list[Any]) -> list[str]:
+        return [str(value) for value in values if value not in (None, "")]
+
+    primary = _to_str_list([primary_text])
+    fallback = _to_str_list(fallback_texts)
+    if not primary and not fallback:
         return None
 
     index = match_index or SegmentMatchIndex(segments)
-    candidate_data = [
-        (candidate, normalize_text(candidate), frozenset(normalize_text(candidate).split()))
-        for candidate in candidate_texts
-    ]
-    group_indices: list[int] = []
-    seen_group_indices: set[int] = set()
-    for _candidate, candidate_norm, _candidate_tokens in candidate_data:
-        if not candidate_norm:
-            continue
-        for group_index in index.shortlist(candidate_norm):
-            if group_index not in seen_group_indices:
-                seen_group_indices.add(group_index)
-                group_indices.append(group_index)
 
-    best_group: Optional[list[dict[str, Any]]] = None
-    best_score = 0.0
-    for group_index in group_indices:
-        record = index.records[group_index]
-        group = record.segments
-        for _candidate, candidate_norm, candidate_tokens in candidate_data:
-            score = match_score_normalized(candidate_norm, record.normalized)
-            used_count = sum(segment.get("id") in used_segment_ids for segment in group)
-            if used_count:
-                score *= 0.94 ** used_count
-            if len(group) > 1:
-                coverage = len(candidate_tokens & record.tokens) / max(len(candidate_tokens), 1)
-                if coverage >= 0.8:
-                    score = min(1.0, score + 0.04)
-            if score > best_score:
-                best_group = group
-                best_score = score
+    def _search(texts: list[str]) -> Optional[tuple[list[dict[str, Any]], float]]:
+        candidate_data = [
+            (candidate, normalize_text(candidate), frozenset(normalize_text(candidate).split()))
+            for candidate in texts
+        ]
+        group_indices: list[int] = []
+        seen_group_indices: set[int] = set()
+        for _candidate, candidate_norm, _candidate_tokens in candidate_data:
+            if not candidate_norm:
+                continue
+            for group_index in index.shortlist(candidate_norm):
+                if group_index not in seen_group_indices:
+                    seen_group_indices.add(group_index)
+                    group_indices.append(group_index)
 
-    if best_group and best_score >= 0.48:
-        return best_group, best_score
-    return None
+        best_group: Optional[list[dict[str, Any]]] = None
+        best_score = 0.0
+        for group_index in group_indices:
+            record = index.records[group_index]
+            group = record.segments
+            for _candidate, candidate_norm, candidate_tokens in candidate_data:
+                score = match_score_normalized(candidate_norm, record.normalized)
+                used_count = sum(segment.get("id") in used_segment_ids for segment in group)
+                if used_count:
+                    score *= 0.94 ** used_count
+                if len(group) > 1:
+                    coverage = len(candidate_tokens & record.tokens) / max(len(candidate_tokens), 1)
+                    if coverage >= 0.8:
+                        score = min(1.0, score + 0.04)
+                if score > best_score:
+                    best_group = group
+                    best_score = score
+
+        if best_group and best_score >= 0.48:
+            return best_group, best_score
+        return None
+
+    if primary:
+        primary_hit = _search(primary)
+        if primary_hit is not None and primary_hit[1] >= 0.7:
+            return primary_hit
+        # Evidence too short or low-quality — combine with fallback so we still
+        # benefit from extra signal but evidence keeps its priority slot above.
+        combined = _search(primary + fallback) if fallback else primary_hit
+        return combined
+
+    return _search(fallback)
 
 
 def candidate_segment_groups(segments: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -341,4 +364,10 @@ def normalize_text(value: str) -> str:
     value = "".join(char for char in value if unicodedata.category(char) != "Mn")
     value = value.replace("đ", "d")
     value = re.sub(r"[^a-z0-9%/.,:-]+", " ", value)
+    # Vision often inserts whitespace around inline punctuation ("Phúc Thịnh ,
+    # ngày" or "182 / TTr - DA1"). Glue the punctuation back to its neighbours
+    # so substring matches recognise the evidence inside the segment text.
+    value = re.sub(r"\s+([,.:;])", r"\1", value)
+    value = re.sub(r"\s*/\s*", "/", value)
+    value = re.sub(r"\s*-\s*", "-", value)
     return re.sub(r"\s+", " ", value).strip()
