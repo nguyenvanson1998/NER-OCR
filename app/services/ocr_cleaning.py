@@ -224,6 +224,26 @@ def normalize_ocr_chars(text: str) -> str:
     for source, target in replacements.items():
         text = text.replace(source, target)
     text = normalize_ocr_date_artifacts(text)
+    text = normalize_ocr_document_number_artifacts(text)
+    return text
+
+
+def normalize_ocr_document_number_artifacts(text: str) -> str:
+    """Collapse stray whitespace around '/' in document numbers and date fragments.
+
+    OCR often inserts a space when transitioning between handwritten and printed
+    glyphs, e.g. "Số: 1006 /QĐ-BQLDA" or "ngày 24 /11/2025". The space breaks
+    downstream rules that expect the canonical form "1006/QĐ-BQLDA" or "24/11/2025".
+    Only collapse when the slash is sandwiched by alphanumerics, so plain prose
+    like "tỷ lệ 1 / 2 không áp dụng" is left untouched.
+    """
+    # number<space>/<letter-or-digit>  →  number/<letter-or-digit>
+    # Also covers handwriting OCR'd as '%' (e.g. "100% /QĐ" → "100%/QĐ").
+    text = re.sub(r"(?<=[\d%])\s+/(?=[\w\u00c0-\u1ef9])", "/", text)
+    # letter<space>/<digit>             →  letter/<digit>
+    text = re.sub(r"(?<=[A-Za-z\u00c0-\u1ef9])\s+/(?=\d)", "/", text)
+    # </space>digit-or-letter           →  /digit-or-letter (only when slash is glued to text on the left)
+    text = re.sub(r"(?<=[\w%\u00c0-\u1ef9])/\s+(?=[\w\u00c0-\u1ef9])", "/", text)
     return text
 
 
@@ -236,6 +256,21 @@ def normalize_ocr_date_artifacts(text: str) -> str:
     text = re.sub(
         r"\b(ngày|ngay)\s*[.:]?\s*[DĐOQ]\s*[.:]?\s*(\d{1,2})(?=\s+tháng|\s+thang)",
         replace_day,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    def merge_split_day(match: re.Match) -> str:
+        prefix = match.group(1)
+        day = int(match.group(2)) * 10 + int(match.group(3))
+        if 1 <= day <= 31:
+            return f"{prefix} {day:02d}"
+        return match.group(0)
+
+    # Handwritten day digits often OCR'd with a gap, e.g. "ngày 2 1 tháng 11" → "ngày 21 tháng 11".
+    text = re.sub(
+        r"\b(ngày|ngay)\s+(\d)\s+(\d)(?=\s+(?:tháng|thang)\b)",
+        merge_split_day,
         text,
         flags=re.IGNORECASE,
     )
@@ -329,8 +364,12 @@ def whole_line_noise_reason(line: str, line_index: int) -> Optional[str]:
         return "round_seal_artifact"
     if looks_like_short_seal_fragment(line) and line_index > 8:
         return "round_seal_fragment"
+    if looks_like_govt_seal_fragment(line) and line_index > 8:
+        return "round_seal_fragment"
     if looks_like_bank_round_seal_line(line) and line_index > 28:
         return "round_seal_fragment"
+    if looks_like_ocr_garbage_line(line) and line_index > 8:
+        return "ocr_garbage"
     return None
 
 
@@ -366,6 +405,79 @@ def looks_like_short_seal_fragment(line: str) -> bool:
         "nam",
     }
     if normalized in fragments:
+        return True
+    return False
+
+
+# Government/UBND/BQLDA round-seal fragments, plus stray markings frequently
+# OCR'd around the signature block ("VX", "TON", "THI", lone diacritic-less
+# uppercase tokens from rotated stamp glyphs).
+_GOVT_SEAL_FRAGMENTS = frozenset(
+    {
+        "vx",
+        "ton",
+        "thi",
+        "thina",
+        "ubnd",
+        "u b n d",
+        "u.b.n.d",
+        "ub.n.d",
+        "tm ubnd",
+        "bqlda",
+        "qlda",
+        "ban quan",
+        "ban quan ly",
+        "quan l",
+        "quan ly",
+        "du an",
+        "dau tu",
+        "dau tu - ha tang",
+        "dau tu ha tang",
+        "dau tu-ha ta",
+        "dau tu ha ta",
+        "tu-ha ta",
+        "tu - ha ta",
+        "tu ha ta",
+        "ha tang",
+        "ha tan",
+        "phuc thinh",
+        "phuc thin",
+        "phuc thina",
+        "tien duong",
+        "dong anh",
+    }
+)
+
+
+def looks_like_govt_seal_fragment(line: str) -> bool:
+    normalized = normalize_for_noise(line).strip(" .,:;-")
+    if not normalized or len(normalized) > 24:
+        return False
+    return normalized in _GOVT_SEAL_FRAGMENTS
+
+
+def looks_like_ocr_garbage_line(line: str) -> bool:
+    """Pure OCR noise like '¡ON', 'd'1', single letters, stray punctuation runs.
+
+    Length-capped and intentionally narrow so we never drop meaningful tokens
+    such as single-letter list markers wrapped in punctuation ("a)", "(b)") or
+    legitimate one-word headers.
+    """
+    stripped = line.strip()
+    if not stripped or len(stripped) > 6:
+        return False
+    # All-symbol garbage: e.g. "***", "==", "...".
+    if re.fullmatch(r"[\W_]+", stripped):
+        return True
+    # Looks like list marker: skip ("a)", "(b)", "a.", "(1)").
+    if re.fullmatch(r"[(\[]?\s*[\w\u00c0-\u1ef9]\s*[).\]]", stripped):
+        return False
+    compact_alpha = re.sub(r"[^a-zA-Z\u00c0-\u1ef9]", "", stripped)
+    # Lone 1-2 letter line with no list-marker punctuation, e.g. "G", "VX",
+    # "H", "d'1", "¡ON" (after stripping it becomes "ON" → length 2).
+    if len(compact_alpha) <= 2 and not stripped.isalpha():
+        return True
+    if len(compact_alpha) <= 2 and stripped.isalpha() and len(stripped) <= 2:
         return True
     return False
 

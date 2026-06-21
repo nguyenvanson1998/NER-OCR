@@ -35,3 +35,4 @@ docker-compose*.yml
 # Credentials phải mount qua volume, không bake vào image
 credentials/*.json
 credentials/Icon
+NER-OCR/

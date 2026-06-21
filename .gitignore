@@ -133,3 +133,4 @@ dump.rdb
 /tmp/
 *.log
 .ruff_cache/
+NER-OCR/

@@ -1334,7 +1334,63 @@ def extract_signed_or_effective_date(text: str) -> Optional[tuple[str, Any, str,
             normalized = normalize_date(date)
             display = format_display_date(normalized) if normalized else None
             return display or date, normalized or date, line, 0.74
+
+    # Priority 4: Latest-date fallback. Heuristic: the most recent date in the
+    # document (excluding legal/reference contexts) is usually the signing date.
+    # Helps when OCR mangles the header date line so priorities 1-3 cannot match.
+    latest = _pick_latest_signing_date(text)
+    if latest is not None:
+        return latest
     return None
+
+
+def _pick_latest_signing_date(
+    text: str,
+) -> Optional[tuple[str, Any, str, float]]:
+    candidates: list[tuple[str, str, str]] = []  # (iso, display, evidence)
+
+    def _context_is_reference(start: int, end: int) -> bool:
+        context = normalize_for_rules(text[max(0, start - 120) : end + 50])
+        return any(keyword in context for keyword in DATE_REFERENCE_CONTEXT_KEYWORDS)
+
+    def _line_of(start: int, end: int) -> str:
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        if line_end == -1:
+            line_end = len(text)
+        return clean_text(text[line_start:line_end])
+
+    for match in re.finditer(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text):
+        if _context_is_reference(match.start(), match.end()):
+            continue
+        iso = normalize_date(match.group(0))
+        if not iso:
+            continue
+        display = format_display_date(iso) or match.group(0)
+        candidates.append((iso, display, _line_of(match.start(), match.end())))
+
+    word_pattern = re.compile(
+        r"(?:ngày|ngay)\s*[,:.]?\s*(\d{1,2})\s*[,;:.]?\s*"
+        r"(?:tháng|thang)\s+(\d{1,2})\s*[,;:.]?\s*(?:năm|nam)\s+(\d{4})",
+        flags=re.IGNORECASE,
+    )
+    for match in word_pattern.finditer(text):
+        if _context_is_reference(match.start(), match.end()):
+            continue
+        day, month, year = match.groups()
+        try:
+            iso = f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        except ValueError:
+            continue
+        display = f"{int(day):02d}/{int(month):02d}/{int(year):04d}"
+        candidates.append((iso, display, _line_of(match.start(), match.end())))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    iso, display, evidence = candidates[-1]
+    return display, iso, evidence, 0.70
 
 
 MONEY_PATTERN = re.compile(
